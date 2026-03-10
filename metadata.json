@@ -1,0 +1,5 @@
+{
+  "name": "Moodify",
+  "description": "AI-powered mood-based music recommendations to match your current vibe.",
+  "requestFramePermissions": ["camera"]
+}
