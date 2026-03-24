@@ -1,0 +1,49 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Stores user preferences and metadata",
+      "type": "object",
+      "properties": {
+        "displayName": { "type": "string", "description": "The user's display name" },
+        "email": { "type": "string", "format": "email", "description": "The user's email address" },
+        "preferredMoods": { "type": "array", "items": { "type": "string" }, "description": "List of moods the user prefers" },
+        "likedGenres": { "type": "array", "items": { "type": "string" }, "description": "List of genres the user likes" },
+        "lastUpdated": { "type": "string", "format": "date-time", "description": "When the profile was last updated" }
+      },
+      "required": ["email", "lastUpdated"]
+    },
+    "HistoryEntry": {
+      "title": "History Entry",
+      "description": "A record of a music recommendation session",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The ID of the user" },
+        "mood": { "type": "string", "description": "The mood searched for" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "When the search occurred" },
+        "recommendations": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "artist": { "type": "string" },
+              "movie": { "type": "string" }
+            }
+          }
+        }
+      },
+      "required": ["userId", "mood", "timestamp", "recommendations"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile documents"
+    },
+    "/history/{historyId}": {
+      "schema": "HistoryEntry",
+      "description": "Listening history records"
+    }
+  }
+}

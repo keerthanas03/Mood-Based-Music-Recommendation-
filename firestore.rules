@@ -1,0 +1,98 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: userId (UID)
+    // Fields:
+    //   - displayName: string (optional)
+    //   - email: string (required, email format)
+    //   - preferredMoods: list (required, strings)
+    //   - likedGenres: list (required, strings)
+    //   - lastUpdated: string (required, ISO 8601)
+    //
+    // Collection: history
+    // Document ID: historyId (auto-generated)
+    // Fields:
+    //   - userId: string (required, UID)
+    //   - mood: string (required)
+    //   - timestamp: string (required, ISO 8601)
+    //   - recommendations: list (required, objects)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "keerthanas2383@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'preferredMoods', 'likedGenres', 'lastUpdated']) &&
+             data.keys().hasOnly(['displayName', 'email', 'preferredMoods', 'likedGenres', 'lastUpdated', 'role']) &&
+             isValidEmail(data.email) &&
+             data.preferredMoods is list &&
+             data.likedGenres is list &&
+             isValidDateString(data.lastUpdated);
+    }
+
+    function isValidHistory(data) {
+      return data.keys().hasAll(['userId', 'mood', 'timestamp', 'recommendations']) &&
+             data.keys().hasOnly(['userId', 'mood', 'timestamp', 'recommendations']) &&
+             data.userId == request.auth.uid &&
+             data.mood is string &&
+             isValidDateString(data.timestamp) &&
+             data.recommendations is list;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) && (!('role' in request.resource.data) || isAdmin());
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) && (request.resource.data.role == resource.data.role || isAdmin());
+    }
+
+    match /history/{historyId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && isValidHistory(request.resource.data);
+      allow update: if false; // History is immutable
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
