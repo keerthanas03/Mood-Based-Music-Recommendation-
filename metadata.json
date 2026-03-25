@@ -1,5 +1,7 @@
 {
-  "name": "Moodify Tamil",
+  "name": "NEUROTUNES",
   "description": "Premium AI-powered music recommendations for Kollywood fans. Discover the perfect Tamil soundtrack for every mood with sonic analysis and camera-based emotion detection.",
-  "requestFramePermissions": ["camera"]
+  "requestFramePermissions": [
+    "camera"
+  ]
 }

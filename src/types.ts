@@ -28,6 +28,15 @@ export interface HistoryEntry {
   recommendations: Song[];
 }
 
+export interface SavedPlaylist {
+  id?: string;
+  userId: string;
+  name: string;
+  mood: string;
+  timestamp: string;
+  songs: Song[];
+}
+
 export type MoodType = 'Energetic' | 'Relaxed' | 'Melancholic' | 'Focused' | 'Romantic' | 'Adventurous' | 'Happy' | 'Angry' | 'Spiritual' | 'Nostalgic' | 'Party' | 'Epic' | 'Custom';
 
 export type ActivityType = 'Workout' | 'Study' | 'Relax' | 'Commute' | 'Party' | 'Cooking' | 'Driving' | 'Sleeping' | 'Gaming';

@@ -22,6 +22,15 @@ service cloud.firestore {
     //   - timestamp: string (required, ISO 8601)
     //   - recommendations: list (required, objects)
     //
+    // Collection: playlists
+    // Document ID: playlistId (auto-generated)
+    // Fields:
+    //   - userId: string (required, UID)
+    //   - name: string (required)
+    //   - mood: string (required)
+    //   - timestamp: string (required, ISO 8601)
+    //   - songs: list (required, objects)
+    //
     // ===============================================================
 
     // ===============================================================
@@ -74,6 +83,16 @@ service cloud.firestore {
              data.recommendations is list;
     }
 
+    function isValidPlaylist(data) {
+      return data.keys().hasAll(['userId', 'name', 'mood', 'timestamp', 'songs']) &&
+             data.keys().hasOnly(['userId', 'name', 'mood', 'timestamp', 'songs']) &&
+             data.userId == request.auth.uid &&
+             data.name is string &&
+             data.mood is string &&
+             isValidDateString(data.timestamp) &&
+             data.songs is list;
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -88,6 +107,13 @@ service cloud.firestore {
       allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
       allow create: if isAuthenticated() && isValidHistory(request.resource.data);
       allow update: if false; // History is immutable
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    match /playlists/{playlistId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && isValidPlaylist(request.resource.data);
+      allow update: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin()) && isValidPlaylist(request.resource.data);
       allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
     }
 

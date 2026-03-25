@@ -14,8 +14,8 @@ export default defineConfig(({mode}) => {
         registerType: 'autoUpdate',
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'mask-icon.svg'],
         manifest: {
-          name: 'Moodify Tamil',
-          short_name: 'Moodify',
+          name: 'NEUROTUNES',
+          short_name: 'NEUROTUNES',
           description: 'AI Powered Tamil Music Recommendations',
           theme_color: '#0a0502',
           icons: [

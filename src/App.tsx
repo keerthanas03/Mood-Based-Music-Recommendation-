@@ -53,14 +53,14 @@ import {
 } from 'lucide-react';
 import { getMusicRecommendations, detectEmotionFromImage, getLyrics, searchSongs } from './services/gemini';
 import ReactPlayer from 'react-player';
-import { Song, PlaylistResponse, MoodType, ActivityType, UserProfile, HistoryEntry } from './types';
+import { Song, PlaylistResponse, MoodType, ActivityType, UserProfile, HistoryEntry, SavedPlaylist } from './types';
 import CameraCapture from './components/CameraCapture';
 import Visualizer from './components/Visualizer';
 import { auth, db, signIn, logout, handleFirestoreError, OperationType } from './firebase';
 import { db_local, type DownloadedSong } from './lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { doc, onSnapshot, setDoc, collection, addDoc, query, where, orderBy, limit } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, collection, addDoc, deleteDoc, query, where, orderBy, limit } from 'firebase/firestore';
 
 interface Theme {
   id: string;
@@ -72,8 +72,11 @@ interface Theme {
     glow: string;
     text: string;
     textSecondary: string;
+    textMuted?: string;
     glassBg: string;
     glassBorder: string;
+    shadowColor?: string;
+    shadowHoverColor?: string;
   };
 }
 
@@ -100,27 +103,27 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
               <X size={32} />
             </div>
             <h2 className="text-2xl font-bold mb-4">Something went wrong</h2>
-            <p className="text-white/50 text-sm mb-6 leading-relaxed">
+            <p className="text-[var(--text-secondary)] text-sm mb-6 leading-relaxed">
               We encountered an unexpected error. This might be due to a connection issue or a temporary glitch.
             </p>
             
             <div className="flex flex-col gap-3">
               <button
                 onClick={() => window.location.reload()}
-                className="w-full py-4 rounded-2xl bg-white text-black font-bold uppercase tracking-widest text-xs hover:bg-orange-500 hover:text-white transition-all"
+                className="w-full py-4 rounded-2xl bg-white text-black font-bold uppercase tracking-widest text-xs hover:bg-orange-500 hover:text-[var(--text-primary)] transition-all"
               >
                 Reload Application
               </button>
               
               <button
                 onClick={() => this.setState({ showDetails: !this.state.showDetails })}
-                className="text-white/30 text-[10px] font-mono uppercase tracking-widest hover:text-white transition-all"
+                className="text-[var(--text-secondary)] text-[10px] font-mono uppercase tracking-widest hover:text-[var(--text-primary)] transition-all"
               >
                 {this.state.showDetails ? 'Hide Details' : 'Show Details'}
               </button>
 
               {this.state.showDetails && (
-                <div className="mt-4 p-4 rounded-xl bg-black/40 border border-white/10 text-left overflow-auto max-h-40">
+                <div className="mt-4 p-4 rounded-xl bg-black/40 border border-[var(--glass-border)] text-left overflow-auto max-h-40">
                   <pre className="text-[10px] font-mono text-rose-400/80 whitespace-pre-wrap">
                     {this.state.error?.stack || this.state.error?.message || 'No stack trace available'}
                   </pre>
@@ -170,6 +173,15 @@ const THEMES: Theme[] = [
     }
   },
   {
+    id: 'palegreen',
+    name: 'Pale Green',
+    colors: { 
+      bg: '#f0fdf4', primary: '#22c55e', secondary: '#16a34a', glow: '#dcfce7', 
+      text: '#14532d', textSecondary: 'rgba(20, 83, 45, 0.6)', textMuted: 'rgba(20, 83, 45, 0.4)', glassBg: 'rgba(34, 197, 94, 0.05)', glassBorder: 'rgba(34, 197, 94, 0.1)',
+      shadowColor: 'transparent', shadowHoverColor: 'transparent'
+    }
+  },
+  {
     id: 'forest',
     name: 'Forest',
     colors: { 
@@ -206,7 +218,7 @@ const ACTIVITIES: { type: ActivityType; icon: React.ReactNode; color: string }[]
   { type: 'Gaming', icon: <Gamepad2 size={20} />, color: 'from-purple-600 to-fuchsia-700' },
 ];
 
-const Player = ReactPlayer as any;
+const Player = (ReactPlayer as any).default || ReactPlayer;
 
 export default function App() {
   const [selectedMood, setSelectedMood] = useState<MoodType | null>(null);
@@ -224,7 +236,7 @@ export default function App() {
       const theme = THEMES.find(t => t.id === saved);
       if (theme) return theme;
     }
-    return THEMES[0];
+    return THEMES.find(t => t.id === 'palegreen') || THEMES[0];
   });
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
@@ -255,6 +267,8 @@ export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [savedPlaylists, setSavedPlaylists] = useState<SavedPlaylist[]>([]);
+  const [showSavedPlaylists, setShowSavedPlaylists] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
@@ -265,6 +279,7 @@ export default function App() {
   const [lyrics, setLyrics] = useState<string | null>(null);
   const [isLyricsLoading, setIsLyricsLoading] = useState(false);
   const [played, setPlayed] = useState(0);
+  const [isSeeking, setIsSeeking] = useState(false);
   const [duration, setDuration] = useState(0);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const playerRef = useRef<any>(null);
@@ -335,9 +350,22 @@ export default function App() {
       setHistory(historyData);
     }, (e) => handleFirestoreError(e, OperationType.LIST, 'history'));
 
+    // Listen to saved playlists
+    const playlistsRef = collection(db, 'playlists');
+    const playlistsQuery = query(
+      playlistsRef,
+      where('userId', '==', user.uid),
+      orderBy('timestamp', 'desc')
+    );
+    const unsubscribePlaylists = onSnapshot(playlistsQuery, (snapshot) => {
+      const playlistsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as unknown as SavedPlaylist));
+      setSavedPlaylists(playlistsData);
+    }, (e) => handleFirestoreError(e, OperationType.LIST, 'playlists'));
+
     return () => {
       unsubscribeProfile();
       unsubscribeHistory();
+      unsubscribePlaylists();
     };
   }, [user]);
 
@@ -369,7 +397,7 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('moodify_theme', currentTheme.id);
     const root = document.documentElement;
-    if (currentTheme.id === 'daylight') {
+    if (currentTheme.id === 'daylight' || currentTheme.id === 'palegreen') {
       root.classList.add('light');
     } else {
       root.classList.remove('light');
@@ -380,8 +408,25 @@ export default function App() {
     root.style.setProperty('--glow-color', currentTheme.colors.glow);
     root.style.setProperty('--text-primary', currentTheme.colors.text);
     root.style.setProperty('--text-secondary', currentTheme.colors.textSecondary);
+    if (currentTheme.colors.textMuted) {
+      root.style.setProperty('--text-muted', currentTheme.colors.textMuted);
+    } else {
+      root.style.removeProperty('--text-muted');
+    }
     root.style.setProperty('--glass-bg', currentTheme.colors.glassBg);
     root.style.setProperty('--glass-border', currentTheme.colors.glassBorder);
+    
+    if (currentTheme.colors.shadowColor) {
+      root.style.setProperty('--shadow-color', currentTheme.colors.shadowColor);
+    } else {
+      root.style.removeProperty('--shadow-color');
+    }
+    
+    if (currentTheme.colors.shadowHoverColor) {
+      root.style.setProperty('--shadow-hover-color', currentTheme.colors.shadowHoverColor);
+    } else {
+      root.style.removeProperty('--shadow-hover-color');
+    }
   }, [currentTheme]);
 
   const toggleFavorite = (song: Song) => {
@@ -457,6 +502,11 @@ export default function App() {
     return favorites.some(s => s.title === song.title && s.artist === song.artist);
   };
 
+  const isValidYoutubeUrl = (url?: string) => {
+    if (!url) return false;
+    return url.includes('youtube.com/watch') || url.includes('youtu.be/');
+  };
+
   const handleDownload = async (song: Song) => {
     if (!isOnline) {
       showToast("You need to be online to download songs.", "error");
@@ -512,7 +562,7 @@ export default function App() {
   const handleShare = () => {
     if (!playlist) return;
     const songList = playlist.songs.map((s, i) => `${i + 1}. ${s.title} - ${s.artist}`).join('\n');
-    const text = `Mood: ${playlist.mood}\n\nRecommended Tamil Songs:\n${songList}\n\nGenerated by Moodify Tamil`;
+    const text = `Mood: ${playlist.mood}\n\nRecommended Tamil Songs:\n${songList}\n\nGenerated by NEUROTUNES`;
     navigator.clipboard.writeText(text);
     setIsShared(true);
     showToast("Playlist copied to clipboard!", "success");
@@ -520,7 +570,7 @@ export default function App() {
   };
 
   const handleShareSong = async (song: Song) => {
-    const text = `Check out this song: "${song.title}" by ${song.artist} on Moodify Tamil!\n\nListen here: ${song.youtubeUrl || `https://www.youtube.com/results?search_query=${encodeURIComponent(`${song.title} ${song.artist}`)}`}`;
+    const text = `Check out this song: "${song.title}" by ${song.artist} on NEUROTUNES!\n\nListen here: ${song.youtubeUrl || `https://www.youtube.com/results?search_query=${encodeURIComponent(`${song.title} ${song.artist}`)}`}`;
     
     const showFeedback = () => {
       setSharedSongId(`${song.title}-${song.artist}`);
@@ -547,6 +597,39 @@ export default function App() {
     } else {
       navigator.clipboard.writeText(text);
       showFeedback();
+    }
+  };
+
+  const handleSavePlaylist = async () => {
+    if (!user) {
+      showToast("Please login to save playlists", "info");
+      return;
+    }
+    if (!playlist) return;
+
+    try {
+      const playlistData: Omit<SavedPlaylist, 'id'> = {
+        userId: user.uid,
+        name: `${playlist.mood} Vibes`,
+        mood: playlist.mood,
+        timestamp: new Date().toISOString(),
+        songs: playlist.songs
+      };
+      await addDoc(collection(db, 'playlists'), playlistData);
+      showToast("Playlist saved successfully!", "success");
+    } catch (e) {
+      console.error("Failed to save playlist:", e);
+      handleFirestoreError(e, OperationType.CREATE, 'playlists');
+    }
+  };
+
+  const handleDeletePlaylist = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'playlists', id));
+      showToast("Playlist deleted", "info");
+    } catch (e) {
+      console.error("Failed to delete playlist:", e);
+      handleFirestoreError(e, OperationType.DELETE, `playlists/${id}`);
     }
   };
 
@@ -681,7 +764,7 @@ export default function App() {
             initial={{ opacity: 0, y: 50, x: '-50%' }}
             animate={{ opacity: 1, y: 0, x: '-50%' }}
             exit={{ opacity: 0, y: 20, x: '-50%' }}
-            className={`fixed bottom-24 left-1/2 z-[1000] px-6 py-3 rounded-2xl glass flex items-center gap-3 shadow-2xl border-white/20 min-w-[300px] ${
+            className={`fixed bottom-24 left-1/2 z-[1000] px-6 py-3 rounded-2xl glass flex items-center gap-3 border-[var(--glass-border)] min-w-[300px] ${
               toast.type === 'error' ? 'border-rose-500/50' : toast.type === 'success' ? 'border-emerald-500/50' : 'border-blue-500/50'
             }`}
           >
@@ -690,8 +773,8 @@ export default function App() {
             }`}>
               {toast.type === 'error' ? <X size={18} /> : toast.type === 'success' ? <Check size={18} /> : <Sparkles size={18} />}
             </div>
-            <p className="text-sm font-medium text-white/90">{toast.message}</p>
-            <button onClick={() => setToast(null)} className="ml-auto text-white/20 hover:text-white transition-colors">
+            <p className="text-sm font-medium text-[var(--text-primary)]">{toast.message}</p>
+            <button onClick={() => setToast(null)} className="ml-auto text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors">
               <X size={14} />
             </button>
           </motion.div>
@@ -756,6 +839,16 @@ export default function App() {
           )}
           
           <button
+            onClick={() => setShowSavedPlaylists(!showSavedPlaylists)}
+            className={`p-3 rounded-full glass transition-all ${
+              showSavedPlaylists ? 'text-orange-400 bg-[var(--glass-bg)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+            title="Saved Playlists"
+          >
+            <ListMusic size={20} />
+          </button>
+
+          <button
             onClick={() => setShowFavorites(!showFavorites)}
             className={`p-3 rounded-full glass transition-all ${
               showFavorites ? 'text-orange-400 bg-[var(--glass-bg)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -778,7 +871,7 @@ export default function App() {
           <button
             onClick={() => {
               const isDark = currentTheme.id === 'midnight';
-              const nextTheme = THEMES.find(t => t.id === (isDark ? 'daylight' : 'midnight')) || THEMES[0];
+              const nextTheme = THEMES.find(t => t.id === (isDark ? 'palegreen' : 'midnight')) || THEMES[0];
               setCurrentTheme(nextTheme);
             }}
             className="p-3 rounded-full glass text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all"
@@ -802,7 +895,7 @@ export default function App() {
                   initial={{ opacity: 0, y: 10, scale: 0.95 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                  className="absolute right-0 mt-2 w-48 glass rounded-2xl overflow-hidden shadow-2xl"
+                  className="absolute right-0 mt-2 w-48 glass rounded-2xl overflow-hidden"
                 >
                   <div className="p-2 space-y-1">
                     {THEMES.map((theme) => (
@@ -813,7 +906,7 @@ export default function App() {
                           setIsThemeMenuOpen(false);
                         }}
                         className={`w-full flex items-center gap-3 px-4 py-2 rounded-xl transition-all ${
-                          currentTheme.id === theme.id ? 'bg-white/10 text-white' : 'text-white/50 hover:bg-white/5'
+                          currentTheme.id === theme.id ? 'bg-[var(--glass-border)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--glass-bg)]'
                         }`}
                       >
                         <div 
@@ -842,7 +935,7 @@ export default function App() {
               AI Powered Recommendations
             </div>
             <h1 className="text-5xl md:text-7xl font-serif font-black mb-8 tracking-tighter leading-none" style={{ color: 'var(--text-primary)' }}>
-              Mood<span className="italic text-gradient">ify</span> <span className="text-xl md:text-2xl align-top text-orange-400/30 font-sans font-light tracking-widest">TAMIL</span>
+              Neuro<span className="italic text-gradient">tunes</span>
             </h1>
                 <p className="text-xl max-w-2xl mx-auto font-light leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
                   The ultimate soundtrack for your soul. Tell us how you feel, and we'll find the perfect Kollywood hits for your moment.
@@ -865,18 +958,18 @@ export default function App() {
                     <Heart size={20} className="text-rose-400" fill="currentColor" />
                     Your Favorites
                   </h2>
-                  <button onClick={() => setShowFavorites(false)} className="text-sm text-white/40 hover:text-white">Close</button>
+                  <button onClick={() => setShowFavorites(false)} className="text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">Close</button>
                 </div>
                 
                 {favorites.length === 0 ? (
-                  <p className="text-center py-10 text-white/30 italic">No favorites yet. Heart some songs to see them here!</p>
+                  <p className="text-center py-10 text-[var(--text-secondary)] italic">No favorites yet. Heart some songs to see them here!</p>
                 ) : (
                   <div className="grid gap-3">
                     {favorites.map((song, index) => (
-                      <div key={`fav-${index}`} className="flex items-center gap-4 p-3 rounded-xl bg-white/5 border border-white/5">
+                      <div key={`fav-${index}`} className="flex items-center gap-4 p-3 rounded-xl bg-[var(--glass-bg)] border border-[var(--glass-border)]">
                         <div className="flex-1 min-w-0">
                           <h4 className="font-medium truncate">{song.title}</h4>
-                          <p className="text-xs text-white/40 truncate">{song.artist}</p>
+                          <p className="text-xs text-[var(--text-secondary)] truncate">{song.artist}</p>
                         </div>
                         <div className="flex items-center gap-2">
                           <button onClick={() => toggleFavorite(song)} className="text-rose-400">
@@ -885,7 +978,7 @@ export default function App() {
                           <button
                             onClick={() => handleShareSong(song)}
                             className={`p-2 rounded-lg transition-all ${
-                              sharedSongId === `${song.title}-${song.artist}` ? 'text-emerald-400 bg-emerald-400/10' : 'text-white/30 hover:text-white'
+                              sharedSongId === `${song.title}-${song.artist}` ? 'text-emerald-400 bg-emerald-400/10' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                             }`}
                             title="Share Song"
                           >
@@ -895,7 +988,7 @@ export default function App() {
                             href={`https://open.spotify.com/search/${encodeURIComponent(`${song.title} ${song.artist}`)}`}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-white/30 hover:text-white"
+                            className="text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                           >
                             <ExternalLink size={16} />
                           </a>
@@ -924,18 +1017,18 @@ export default function App() {
                     <Download size={20} className="text-orange-400" />
                     Offline Downloads
                   </h2>
-                  <button onClick={() => setShowDownloads(false)} className="text-sm text-white/40 hover:text-white">Close</button>
+                  <button onClick={() => setShowDownloads(false)} className="text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">Close</button>
                 </div>
                 
                 {downloads.length === 0 ? (
-                  <p className="text-center py-10 text-white/30 italic">No offline songs yet. Download some songs to access them offline!</p>
+                  <p className="text-center py-10 text-[var(--text-secondary)] italic">No offline songs yet. Download some songs to access them offline!</p>
                 ) : (
                   <div className="grid gap-3">
                     {downloads.map((song, index) => (
-                      <div key={`dl-${index}`} className="flex items-center gap-4 p-3 rounded-xl bg-white/5 border border-white/5">
+                      <div key={`dl-${index}`} className="flex items-center gap-4 p-3 rounded-xl bg-[var(--glass-bg)] border border-[var(--glass-border)]">
                         <div className="flex-1 min-w-0">
                           <h4 className="font-medium truncate">{song.title}</h4>
-                          <p className="text-xs text-white/40 truncate">{song.artist}</p>
+                          <p className="text-xs text-[var(--text-secondary)] truncate">{song.artist}</p>
                         </div>
                         <div className="flex items-center gap-2">
                           <button
@@ -946,7 +1039,7 @@ export default function App() {
                               setPlayerError(null);
                             }}
                             className={`p-2 rounded-lg transition-all ${
-                              currentSong?.title === song.title ? 'text-orange-400 bg-orange-400/10' : 'text-white/30 hover:text-white'
+                              currentSong?.title === song.title ? 'text-orange-400 bg-orange-400/10' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                             }`}
                             title="Play"
                           >
@@ -954,11 +1047,91 @@ export default function App() {
                           </button>
                           <button 
                             onClick={() => song.id && removeDownload(song.id)} 
-                            className="p-2 rounded-lg text-white/30 hover:text-rose-400 transition-all"
+                            className="p-2 rounded-lg text-[var(--text-secondary)] hover:text-rose-400 transition-all"
                             title="Remove Download"
                           >
                             <Trash2 size={16} />
                           </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </motion.section>
+          )}
+        </AnimatePresence>
+
+        {/* Saved Playlists View */}
+        <AnimatePresence>
+          {showSavedPlaylists && (
+            <motion.section
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mb-12 overflow-hidden"
+            >
+              <div className="glass p-8 rounded-3xl">
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-serif font-bold flex items-center gap-2">
+                    <ListMusic size={20} className="text-orange-400" />
+                    Saved Playlists
+                  </h2>
+                  <button onClick={() => setShowSavedPlaylists(false)} className="text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">Close</button>
+                </div>
+                
+                {savedPlaylists.length === 0 ? (
+                  <p className="text-center py-10 text-[var(--text-secondary)] italic">No saved playlists yet. Generate and save a playlist to see it here!</p>
+                ) : (
+                  <div className="grid gap-4">
+                    {savedPlaylists.map((savedPlaylist) => (
+                      <div key={savedPlaylist.id} className="p-5 rounded-2xl bg-[var(--glass-bg)] border border-[var(--glass-border)] hover:bg-[var(--glass-border)] transition-all group">
+                        <div className="flex items-center justify-between mb-4">
+                          <div className="flex items-center gap-3">
+                            <span className="px-3 py-1 rounded-full bg-orange-500/20 text-orange-400 text-xs font-bold uppercase tracking-widest">
+                              {savedPlaylist.mood}
+                            </span>
+                            <h3 className="font-bold text-lg">{savedPlaylist.name}</h3>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                setPlaylist({
+                                  mood: savedPlaylist.mood,
+                                  description: `Your saved ${savedPlaylist.mood} playlist.`,
+                                  songs: savedPlaylist.songs
+                                });
+                                setShowSavedPlaylists(false);
+                                window.scrollTo({ top: 0, behavior: 'smooth' });
+                              }}
+                              className="p-2 rounded-lg text-[var(--text-secondary)] hover:text-orange-400 transition-all"
+                              title="Load Playlist"
+                            >
+                              <Play size={18} />
+                            </button>
+                            <button 
+                              onClick={() => savedPlaylist.id && handleDeletePlaylist(savedPlaylist.id)} 
+                              className="p-2 rounded-lg text-[var(--text-secondary)] hover:text-rose-400 transition-all"
+                              title="Delete Playlist"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          </div>
+                        </div>
+                        <div className="text-xs text-[var(--text-secondary)] font-mono mb-3">
+                          Saved on {new Date(savedPlaylist.timestamp).toLocaleDateString()}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {savedPlaylist.songs.slice(0, 5).map((song, i) => (
+                            <span key={i} className="text-xs px-2 py-1 rounded bg-[var(--glass-bg)] text-[var(--text-secondary)]">
+                              {song.title}
+                            </span>
+                          ))}
+                          {savedPlaylist.songs.length > 5 && (
+                            <span className="text-xs px-2 py-1 rounded bg-[var(--glass-bg)] text-[var(--text-secondary)]">
+                              +{savedPlaylist.songs.length - 5} more
+                            </span>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -987,10 +1160,10 @@ export default function App() {
                 onClick={() => handleMoodClick(mood.type)}
                 disabled={isLoading}
                 className={`flex flex-col items-center justify-center p-8 glass-card group ${
-                  selectedMood === mood.type ? 'ring-2 ring-orange-500/50 bg-white/10' : ''
+                  selectedMood === mood.type ? 'ring-2 ring-orange-500/50 bg-[var(--glass-border)]' : ''
                 }`}
               >
-                <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${mood.color} flex items-center justify-center mb-4 shadow-2xl group-hover:shadow-orange-500/40 transition-all duration-500 group-hover:rotate-6`}>
+                <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${mood.color} flex items-center justify-center mb-4 group-hover:shadow-orange-500/40 transition-all duration-500 group-hover:rotate-6`}>
                   {mood.icon}
                 </div>
                 <span className="text-sm font-semibold tracking-wide uppercase opacity-80 group-hover:opacity-100">{mood.type}</span>
@@ -1015,8 +1188,8 @@ export default function App() {
                 disabled={isLoading}
                 className={`flex items-center gap-3 px-6 py-3 rounded-2xl glass transition-all ${
                   selectedActivity === activity.type 
-                    ? `bg-gradient-to-r ${activity.color} text-white shadow-lg` 
-                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/5'
+                    ? `bg-gradient-to-r ${activity.color} text-white` 
+                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--glass-bg)]'
                 }`}
               >
                 <div className={selectedActivity === activity.type ? 'text-white' : 'text-orange-400'}>
@@ -1048,7 +1221,7 @@ export default function App() {
                 type="button"
                 onClick={() => setIsSearchMode(!isSearchMode)}
                 className={`p-5 rounded-2xl glass transition-all flex items-center justify-center ${
-                  isSearchMode ? 'bg-orange-500 text-white' : 'text-white/50 hover:text-white'
+                  isSearchMode ? 'bg-orange-500 text-white' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`}
                 title={isSearchMode ? "Switch to Mood Search" : "Switch to Song Search"}
               >
@@ -1068,7 +1241,7 @@ export default function App() {
               <button
                 type="submit"
                 disabled={isLoading || !customMood.trim()}
-                className="flex-1 md:flex-none bg-[var(--text-primary)] text-[var(--bg-color)] px-10 rounded-2xl font-bold hover:bg-orange-500 hover:text-white transition-all duration-500 disabled:opacity-50 disabled:cursor-not-allowed shadow-xl hover:shadow-orange-500/20"
+                className="flex-1 md:flex-none bg-[var(--text-primary)] text-[var(--bg-color)] px-10 rounded-2xl font-bold hover:bg-orange-500 hover:text-[var(--text-primary)] transition-all duration-500 disabled:opacity-50 disabled:cursor-not-allowed shadow-xl hover:shadow-orange-500/20"
               >
                 {isLoading ? <RefreshCw className="animate-spin" size={20} /> : (isSearchMode ? 'SEARCH' : 'FIND VIBE')}
               </button>
@@ -1106,7 +1279,7 @@ export default function App() {
                   <Music className="text-orange-500 animate-pulse" size={32} />
                 </div>
               </div>
-              <p className="mt-6 text-white/50 font-mono text-sm animate-pulse">
+              <p className="mt-6 text-[var(--text-secondary)] font-mono text-sm animate-pulse">
                 {loadingMessages[loadingMessageIndex]}
               </p>
             </motion.div>
@@ -1143,13 +1316,30 @@ export default function App() {
                     <h2 className="text-4xl md:text-5xl font-serif font-black mb-4 tracking-tight">Feeling {playlist.mood}</h2>
                       <p className="text-[var(--text-secondary)] italic text-lg leading-relaxed max-w-2xl">{playlist.description}</p>
                   </div>
-                  <button
-                    onClick={handleShare}
-                    className="p-4 rounded-2xl glass-card text-white/50 hover:text-white transition-all flex items-center gap-3 group"
-                  >
-                    {isShared ? <Check size={20} className="text-emerald-400" /> : <Share2 size={20} className="group-hover:rotate-12 transition-transform" />}
-                    <span className="text-xs font-mono uppercase tracking-widest font-bold">{isShared ? 'Copied' : 'Share Playlist'}</span>
-                  </button>
+                  <div className="flex flex-col gap-3">
+                    <button
+                      onClick={() => handleGenerate(playlist.mood as MoodType, selectedActivity)}
+                      disabled={isLoading}
+                      className="p-4 rounded-2xl glass-card text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-orange-500/20 hover:border-orange-500/50 transition-all flex items-center gap-3 group disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <RefreshCw size={20} className={`group-hover:text-orange-400 transition-colors ${isLoading ? 'animate-spin' : ''}`} />
+                      <span className="text-xs font-mono uppercase tracking-widest font-bold">Regenerate</span>
+                    </button>
+                    <button
+                      onClick={handleSavePlaylist}
+                      className="p-4 rounded-2xl glass-card text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-orange-500/20 hover:border-orange-500/50 transition-all flex items-center gap-3 group"
+                    >
+                      <Heart size={20} className="group-hover:text-orange-400 transition-colors" />
+                      <span className="text-xs font-mono uppercase tracking-widest font-bold">Save Playlist</span>
+                    </button>
+                    <button
+                      onClick={handleShare}
+                      className="p-4 rounded-2xl glass-card text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all flex items-center gap-3 group"
+                    >
+                      {isShared ? <Check size={20} className="text-emerald-400" /> : <Share2 size={20} className="group-hover:rotate-12 transition-transform" />}
+                      <span className="text-xs font-mono uppercase tracking-widest font-bold">{isShared ? 'Copied' : 'Share Playlist'}</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -1163,7 +1353,7 @@ export default function App() {
                     whileHover={{ scale: 1.01, backgroundColor: 'rgba(255, 255, 255, 0.08)' }}
                     className="glass-card p-6 flex items-center gap-6 group cursor-default"
                   >
-                    <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center text-white/20 font-serif text-2xl font-black group-hover:bg-orange-500/20 group-hover:text-orange-400 transition-all duration-500 group-hover:scale-110 group-hover:rotate-3 relative overflow-hidden">
+                    <div className="w-16 h-16 rounded-2xl bg-[var(--glass-bg)] border border-[var(--glass-border)] flex items-center justify-center text-[var(--text-muted)] font-serif text-2xl font-black group-hover:bg-orange-500/20 group-hover:text-orange-400 transition-all duration-500 group-hover:scale-110 group-hover:rotate-3 relative overflow-hidden">
                       {currentSong?.title === song.title && isPlaying && !isBuffering ? (
                         <div className="absolute inset-0 flex items-end justify-center pb-2 px-2">
                           <Visualizer isPlaying={isPlaying} isBuffering={isBuffering} barCount={8} />
@@ -1175,7 +1365,7 @@ export default function App() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-4 mb-1">
                         <h3 className="font-bold text-xl truncate group-hover:text-orange-400 transition-colors">{song.title}</h3>
-                        <span className="text-white/30 text-xs font-mono shrink-0">{song.duration}</span>
+                        <span className="text-[var(--text-muted)] text-xs font-mono shrink-0">{song.duration}</span>
                       </div>
                       <p className="text-[var(--text-muted)] text-sm font-medium truncate mb-2">{song.artist} {song.album ? `• ${song.album}` : ''}</p>
                       <div className="flex items-center gap-2 text-[var(--text-muted)] text-xs italic">
@@ -1196,28 +1386,28 @@ export default function App() {
                           setPlayerError(null);
                         }}
                         className={`p-3 rounded-xl transition-all ${
-                          currentSong?.title === song.title ? 'bg-orange-500 text-white' : 'hover:bg-white/10 text-white/20 hover:text-white'
+                          currentSong?.title === song.title ? 'bg-orange-500 text-white' : 'hover:bg-[var(--glass-bg)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
                         }`}
-                        title={isOnline ? "Play in Moodify" : isDownloaded(song) ? "Play Offline" : "Unavailable Offline"}
+                        title={isOnline ? "Play in NEUROTUNES" : isDownloaded(song) ? "Play Offline" : "Unavailable Offline"}
                       >
                         <Play size={20} fill={currentSong?.title === song.title ? "currentColor" : "none"} />
                       </button>
-                      <div className="h-8 w-[1px] bg-white/10 mx-1" />
+                      <div className="h-8 w-[1px] bg-[var(--glass-border)] mx-1" />
                       <button
                         onClick={() => toggleFavorite(song)}
-                        className={`p-3 rounded-xl hover:bg-white/10 transition-all ${
-                          isFavorite(song) ? 'text-rose-400 bg-rose-400/10' : 'text-white/20'
+                        className={`p-3 rounded-xl hover:bg-[var(--glass-bg)] transition-all ${
+                          isFavorite(song) ? 'text-rose-400 bg-rose-400/10' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
                         }`}
                         title={isFavorite(song) ? "Remove from Favorites" : "Add to Favorites"}
                       >
                         <Heart size={20} fill={isFavorite(song) ? "currentColor" : "none"} />
                       </button>
-                      <div className="h-8 w-[1px] bg-white/10 mx-1" />
+                      <div className="h-8 w-[1px] bg-[var(--glass-border)] mx-1" />
                       <button
                         onClick={() => handleDownload(song)}
                         disabled={downloadingIds.has(`${song.title}-${song.artist}`)}
-                        className={`p-3 rounded-xl hover:bg-white/10 transition-all ${
-                          isDownloaded(song) ? 'text-orange-400 bg-orange-400/10' : 'text-white/20'
+                        className={`p-3 rounded-xl hover:bg-[var(--glass-bg)] transition-all ${
+                          isDownloaded(song) ? 'text-orange-400 bg-orange-400/10' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
                         }`}
                         title={isDownloaded(song) ? "Downloaded" : "Download for Offline"}
                       >
@@ -1227,20 +1417,20 @@ export default function App() {
                           <Download size={20} fill={isDownloaded(song) ? "currentColor" : "none"} />
                         )}
                       </button>
-                      <div className="h-8 w-[1px] bg-white/10 mx-1" />
+                      <div className="h-8 w-[1px] bg-[var(--glass-border)] mx-1" />
                       <button
                         onClick={() => handleShowLyrics(song)}
-                        className="p-3 rounded-xl hover:bg-white/10 text-white/20 hover:text-white transition-all hover:scale-110"
+                        className="p-3 rounded-xl hover:bg-[var(--glass-bg)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all hover:scale-110"
                         title="Show Lyrics"
                       >
                         <Quote size={20} />
                       </button>
-                      <div className="h-8 w-[1px] bg-white/10 mx-1" />
+                      <div className="h-8 w-[1px] bg-[var(--glass-border)] mx-1" />
                       <a
                         href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`${song.title} ${song.artist}`)}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="p-3 rounded-xl hover:bg-white/10 text-white/20 hover:text-white transition-all hover:scale-110"
+                        className="p-3 rounded-xl hover:bg-[var(--glass-bg)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all hover:scale-110"
                         title="Search on YouTube"
                       >
                         <Play size={20} />
@@ -1249,16 +1439,16 @@ export default function App() {
                         href={`https://open.spotify.com/search/${encodeURIComponent(`${song.title} ${song.artist}`)}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="p-3 rounded-xl hover:bg-white/10 text-white/20 hover:text-white transition-all hover:scale-110"
+                        className="p-3 rounded-xl hover:bg-[var(--glass-bg)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all hover:scale-110"
                         title="Search on Spotify"
                       >
                         <ExternalLink size={20} />
                       </a>
-                      <div className="h-8 w-[1px] bg-white/10 mx-1" />
+                      <div className="h-8 w-[1px] bg-[var(--glass-border)] mx-1" />
                       <button
                         onClick={() => handleShareSong(song)}
-                        className={`p-3 rounded-xl hover:bg-white/10 transition-all ${
-                          sharedSongId === `${song.title}-${song.artist}` ? 'text-emerald-400 bg-emerald-400/10' : 'text-white/20 hover:text-white'
+                        className={`p-3 rounded-xl hover:bg-[var(--glass-bg)] transition-all ${
+                          sharedSongId === `${song.title}-${song.artist}` ? 'text-emerald-400 bg-emerald-400/10' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
                         }`}
                         title="Share Song"
                       >
@@ -1272,7 +1462,7 @@ export default function App() {
               <div className="text-center pt-8">
                 <button
                   onClick={() => handleGenerate(playlist.mood)}
-                  className="inline-flex items-center gap-2 px-8 py-3 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition-all text-sm font-medium"
+                  className="inline-flex items-center gap-2 px-8 py-3 rounded-full bg-[var(--glass-bg)] border border-[var(--glass-border)] hover:bg-[var(--glass-border)] transition-all text-sm font-medium"
                 >
                   <RefreshCw size={16} />
                   Refresh Recommendations
@@ -1306,12 +1496,12 @@ export default function App() {
                   </div>
                   <div>
                     <h2 className="text-2xl font-bold">User Profile</h2>
-                    <p className="text-white/40 text-sm font-mono uppercase tracking-wider">Personalize your journey</p>
+                    <p className="text-[var(--text-secondary)] text-sm font-mono uppercase tracking-wider">Personalize your journey</p>
                   </div>
                 </div>
                 <button
                   onClick={() => setIsProfileModalOpen(false)}
-                  className="p-2 rounded-xl hover:bg-white/10 text-white/40 hover:text-white transition-all"
+                  className="p-2 rounded-xl hover:bg-[var(--glass-border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all"
                 >
                   <X size={24} />
                 </button>
@@ -1319,7 +1509,7 @@ export default function App() {
 
               <div className="space-y-8">
                 <div>
-                  <label className="block text-xs font-mono uppercase tracking-widest text-white/30 mb-3">Preferred Moods</label>
+                  <label className="block text-xs font-mono uppercase tracking-widest text-[var(--text-secondary)] mb-3">Preferred Moods</label>
                   <div className="flex flex-wrap gap-2">
                     {MOODS.map((mood) => (
                       <button
@@ -1334,7 +1524,7 @@ export default function App() {
                         className={`px-4 py-2 rounded-xl text-sm font-medium transition-all border ${
                           userProfile.preferredMoods.includes(mood.type)
                             ? 'bg-orange-500/20 border-orange-500/50 text-orange-400'
-                            : 'bg-white/5 border-white/10 text-white/50 hover:bg-white/10'
+                            : 'bg-[var(--glass-bg)] border-[var(--glass-border)] text-[var(--text-secondary)] hover:bg-[var(--glass-border)]'
                         }`}
                       >
                         {mood.type}
@@ -1344,7 +1534,7 @@ export default function App() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-mono uppercase tracking-widest text-white/30 mb-3">Liked Genres</label>
+                  <label className="block text-xs font-mono uppercase tracking-widest text-[var(--text-secondary)] mb-3">Liked Genres</label>
                   <div className="flex flex-wrap gap-2">
                     {['Melody', 'Folk', 'Rock', 'Jazz', 'Classical', 'Hip Hop', 'EDM', 'Gana'].map((genre) => (
                       <button
@@ -1359,7 +1549,7 @@ export default function App() {
                         className={`px-4 py-2 rounded-xl text-sm font-medium transition-all border ${
                           userProfile.likedGenres.includes(genre)
                             ? 'bg-orange-500/20 border-orange-500/50 text-orange-400'
-                            : 'bg-white/5 border-white/10 text-white/50 hover:bg-white/10'
+                            : 'bg-[var(--glass-bg)] border-[var(--glass-border)] text-[var(--text-secondary)] hover:bg-[var(--glass-border)]'
                         }`}
                       >
                         {genre}
@@ -1368,8 +1558,8 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="pt-4 border-t border-white/10">
-                  <div className="flex items-center justify-between text-xs text-white/30 font-mono">
+                <div className="pt-4 border-t border-[var(--glass-border)]">
+                  <div className="flex items-center justify-between text-xs text-[var(--text-secondary)] font-mono">
                     <span>Email: {userProfile.email}</span>
                     <span>Last Updated: {new Date(userProfile.lastUpdated).toLocaleDateString()}</span>
                   </div>
@@ -1403,12 +1593,12 @@ export default function App() {
                   </div>
                   <div>
                     <h2 className="text-2xl font-bold">Listening History</h2>
-                    <p className="text-white/40 text-sm font-mono uppercase tracking-wider">Your sonic journey</p>
+                    <p className="text-[var(--text-secondary)] text-sm font-mono uppercase tracking-wider">Your sonic journey</p>
                   </div>
                 </div>
                 <button
                   onClick={() => setShowHistory(false)}
-                  className="p-2 rounded-xl hover:bg-white/10 text-white/40 hover:text-white transition-all"
+                  className="p-2 rounded-xl hover:bg-[var(--glass-border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all"
                 >
                   <X size={24} />
                 </button>
@@ -1416,25 +1606,25 @@ export default function App() {
 
               <div className="flex-1 overflow-y-auto pr-2 space-y-4 custom-scrollbar">
                 {history.length === 0 ? (
-                  <div className="text-center py-20 text-white/20 italic">
+                  <div className="text-center py-20 text-[var(--text-muted)] italic">
                     No history yet. Start exploring!
                   </div>
                 ) : (
                   history.map((entry, i) => (
-                    <div key={i} className="p-6 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all group">
+                    <div key={i} className="p-6 rounded-2xl bg-[var(--glass-bg)] border border-[var(--glass-border)] hover:bg-[var(--glass-border)] transition-all group">
                       <div className="flex items-center justify-between mb-4">
                         <div className="flex items-center gap-3">
                           <span className="px-3 py-1 rounded-full bg-orange-500/20 text-orange-400 text-xs font-bold uppercase tracking-widest">
                             {entry.mood}
                           </span>
-                          <div className="flex items-center gap-1.5 text-white/30 text-xs font-mono">
+                          <div className="flex items-center gap-1.5 text-[var(--text-secondary)] text-xs font-mono">
                             <Clock size={12} />
                             {new Date(entry.timestamp).toLocaleString()}
                           </div>
                         </div>
                         <button
                           onClick={() => handleGenerate(entry.mood)}
-                          className="text-white/20 hover:text-white transition-all"
+                          className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all"
                           title="Re-generate"
                         >
                           <RefreshCw size={16} />
@@ -1451,7 +1641,7 @@ export default function App() {
                                 setPlayerError(null);
                                 setShowHistory(false);
                               }}
-                              className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-[10px] font-bold text-white/20 group-hover/song:bg-orange-500 group-hover/song:text-white transition-all relative overflow-hidden"
+                              className="w-8 h-8 rounded-lg bg-[var(--glass-bg)] flex items-center justify-center text-[10px] font-bold text-[var(--text-muted)] group-hover/song:bg-orange-500 group-hover/song:text-white transition-all relative overflow-hidden"
                             >
                               {currentSong?.title === song.title && isPlaying && !isBuffering ? (
                                 <div className="absolute inset-0 flex items-end justify-center pb-1 px-1">
@@ -1474,16 +1664,16 @@ export default function App() {
                                       handleShareSong(song);
                                     }}
                                     className={`p-1 rounded transition-all ${
-                                      sharedSongId === `${song.title}-${song.artist}` ? 'text-emerald-400' : 'text-white/20 hover:text-white'
+                                      sharedSongId === `${song.title}-${song.artist}` ? 'text-emerald-400' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
                                     }`}
                                     title="Share Song"
                                   >
                                     {sharedSongId === `${song.title}-${song.artist}` ? <Check size={12} /> : <Share2 size={12} />}
                                   </button>
-                                  <span className="text-[10px] text-white/20 font-mono shrink-0">{song.duration}</span>
+                                  <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{song.duration}</span>
                                 </div>
                               </div>
-                              <p className="text-white/40 text-xs truncate">{song.artist}</p>
+                              <p className="text-[var(--text-secondary)] text-xs truncate">{song.artist}</p>
                             </div>
                           </div>
                         ))}
@@ -1511,19 +1701,19 @@ export default function App() {
               exit={{ scale: 0.9, y: 20 }}
               className="glass-card w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden"
             >
-              <div className="p-6 border-b border-white/10 flex items-center justify-between">
+              <div className="p-6 border-b border-[var(--glass-border)] flex items-center justify-between">
                 <div className="flex items-center gap-4">
                   <div className="w-10 h-10 rounded-xl bg-orange-500/20 flex items-center justify-center text-orange-400">
                     <Quote size={20} />
                   </div>
                   <div>
                     <h3 className="font-bold text-lg">{currentSong?.title}</h3>
-                    <p className="text-white/40 text-xs">{currentSong?.artist}</p>
+                    <p className="text-[var(--text-secondary)] text-xs">{currentSong?.artist}</p>
                   </div>
                 </div>
                 <button
                   onClick={() => setShowLyrics(false)}
-                  className="p-2 rounded-xl hover:bg-white/10 text-white/40 hover:text-white transition-all"
+                  className="p-2 rounded-xl hover:bg-[var(--glass-border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all"
                 >
                   <X size={24} />
                 </button>
@@ -1533,10 +1723,10 @@ export default function App() {
                 {isLyricsLoading ? (
                   <div className="flex flex-col items-center justify-center py-20 gap-4">
                     <RefreshCw size={32} className="text-orange-400 animate-spin" />
-                    <p className="text-white/40 font-mono text-xs uppercase tracking-widest">Fetching lyrics...</p>
+                    <p className="text-[var(--text-secondary)] font-mono text-xs uppercase tracking-widest">Fetching lyrics...</p>
                   </div>
                 ) : (
-                  <div className="whitespace-pre-wrap text-lg leading-relaxed text-white/80 font-serif italic text-center selection:bg-orange-500/30">
+                  <div className="whitespace-pre-wrap text-lg leading-relaxed text-[var(--text-primary)] font-serif italic text-center selection:bg-orange-500/30">
                     {lyrics?.split('\n').map((line, i) => {
                       if (line.startsWith('[') && line.endsWith(']')) {
                         return (
@@ -1551,8 +1741,8 @@ export default function App() {
                 )}
               </div>
               
-              <div className="p-6 border-t border-white/10 bg-white/5 text-center">
-                <p className="text-[10px] text-white/20 font-mono uppercase tracking-widest">
+              <div className="p-6 border-t border-[var(--glass-border)] bg-[var(--glass-bg)] text-center">
+                <p className="text-[10px] text-[var(--text-muted)] font-mono uppercase tracking-widest">
                   Lyrics provided by Gemini AI
                 </p>
               </div>
@@ -1569,7 +1759,7 @@ export default function App() {
             exit={{ y: 100, opacity: 0 }}
             className="fixed bottom-0 left-0 right-0 z-[150] p-4 md:p-6"
           >
-            <div className="max-w-5xl mx-auto glass-card p-4 flex items-center justify-between gap-6 shadow-2xl border-white/20 relative overflow-hidden">
+            <div className="max-w-5xl mx-auto glass-card p-4 flex items-center justify-between gap-6 border-[var(--glass-border)] relative overflow-hidden">
               {/* Subtle Background Visualizer */}
               <div className="absolute inset-0 -z-10 flex items-end justify-center px-10 pb-2">
                 <Visualizer 
@@ -1587,7 +1777,7 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     <h4 className="font-bold text-sm truncate">{currentSong.title}</h4>
                   </div>
-                  <p className="text-white/40 text-xs truncate">{currentSong.artist}</p>
+                  <p className="text-[var(--text-secondary)] text-xs truncate">{currentSong.artist}</p>
                   {playerError ? (
                     <div className="flex items-center gap-2 mt-1">
                       <p className="text-rose-400 text-[10px] font-mono uppercase tracking-widest animate-pulse">
@@ -1603,13 +1793,13 @@ export default function App() {
                         <ExternalLink size={10} />
                       </a>
                     </div>
-                  ) : !currentSong.youtubeUrl && (
+                  ) : !isValidYoutubeUrl(currentSong.youtubeUrl) && (
                     <div className="flex items-center gap-2 mt-1">
-                      <p className="text-white/20 text-[10px] font-mono uppercase tracking-widest">
+                      <p className="text-[var(--text-muted)] text-[10px] font-mono uppercase tracking-widest">
                         No direct link
                       </p>
                       <a 
-                        href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`${currentSong.title} ${currentSong.artist}`)}`}
+                        href={currentSong.youtubeUrl || `https://www.youtube.com/results?search_query=${encodeURIComponent(`${currentSong.title} ${currentSong.artist}`)}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-orange-400 hover:text-orange-300 transition-colors flex items-center gap-1"
@@ -1623,17 +1813,24 @@ export default function App() {
               </div>
 
               <div className="flex flex-col items-center gap-2 flex-1 max-w-2xl relative">
-                <div className="absolute opacity-0 -z-50 overflow-hidden w-1 h-1">
-                  {ReactPlayer && currentSong && (
+                <div className="absolute inset-0 -z-50 opacity-[0.01] overflow-hidden rounded-2xl">
+                  {Player && (
                     <Player
-                      key={currentSong.youtubeUrl}
                       ref={playerRef}
-                      url={currentSong.youtubeUrl}
+                      url={currentSong?.youtubeUrl || ''}
                       playing={isPlaying}
                       volume={isMuted ? 0 : volume}
-                      onProgress={(state: any) => setPlayed(state.played)}
-                      onDuration={(d: number) => setDuration(d)}
+                      onProgress={(state: any) => {
+                        if (!isSeeking) {
+                          setPlayed(state.played);
+                        }
+                      }}
+                      onDuration={(d: number) => {
+                        console.log("Duration:", d);
+                        setDuration(d);
+                      }}
                       onReady={() => {
+                        console.log("Player Ready");
                         if (playerRef.current) {
                           const d = playerRef.current.getDuration();
                           if (d > 0) setDuration(d);
@@ -1659,14 +1856,13 @@ export default function App() {
                       config={{
                         youtube: {
                           playerVars: { 
-                            autoplay: 1,
                             controls: 0,
                             modestbranding: 1,
                             rel: 0,
                             showinfo: 0,
-                            origin: window.location.origin
+                            playsinline: 1
                           }
-                        }
+                        } as any
                       }}
                     />
                   )}
@@ -1697,7 +1893,28 @@ export default function App() {
                   <motion.button 
                     whileHover={{ scale: 1.1 }}
                     whileTap={{ scale: 0.95 }}
-                    onClick={() => setIsPlaying(!isPlaying)}
+                    onClick={() => {
+                      setIsPlaying(!isPlaying);
+                      if (!isPlaying && playerRef.current) {
+                        try {
+                          const internalPlayer = playerRef.current.getInternalPlayer();
+                          if (internalPlayer && internalPlayer.playVideo) {
+                            internalPlayer.playVideo();
+                          }
+                        } catch (e) {
+                          console.error("Failed to play video directly:", e);
+                        }
+                      } else if (isPlaying && playerRef.current) {
+                        try {
+                          const internalPlayer = playerRef.current.getInternalPlayer();
+                          if (internalPlayer && internalPlayer.pauseVideo) {
+                            internalPlayer.pauseVideo();
+                          }
+                        } catch (e) {
+                          console.error("Failed to pause video directly:", e);
+                        }
+                      }
+                    }}
                     className="w-12 h-12 rounded-full bg-[var(--text-primary)] text-[var(--bg-color)] flex items-center justify-center hover:scale-110 transition-transform shadow-lg relative"
                   >
                     {isBuffering && (
@@ -1728,61 +1945,91 @@ export default function App() {
                   </motion.button>
                 </div>
                 <div className="w-full flex items-center gap-3">
-                  <span className="text-[10px] font-mono text-white/30 w-10 text-right">{formatTime(played * duration)}</span>
-                  <div 
-                    className={`flex-1 h-1.5 bg-white/10 rounded-full relative group/progress cursor-pointer overflow-hidden ${isBuffering ? 'animate-pulse' : ''}`}
-                    onClick={handleSeek}
-                  >
-                    <div className="absolute inset-0 w-full h-full">
+                  <span className="text-[10px] font-mono text-[var(--text-secondary)] w-10 text-right">{formatTime(played * duration)}</span>
+                  <div className="flex-1 relative flex items-center group/scrubber h-6">
+                    <input
+                      type="range"
+                      min={0}
+                      max={0.999999}
+                      step="any"
+                      value={played}
+                      onMouseDown={() => setIsSeeking(true)}
+                      onChange={(e) => setPlayed(parseFloat(e.target.value))}
+                      onMouseUp={(e) => {
+                        setIsSeeking(false);
+                        playerRef.current?.seekTo(parseFloat(e.currentTarget.value));
+                      }}
+                      onTouchStart={() => setIsSeeking(true)}
+                      onTouchEnd={(e) => {
+                        setIsSeeking(false);
+                        playerRef.current?.seekTo(parseFloat(e.currentTarget.value));
+                      }}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                    />
+                    <div className={`w-full h-1.5 bg-[var(--glass-border)] rounded-full relative overflow-hidden ${isBuffering ? 'animate-pulse' : ''}`}>
                       <motion.div 
                         className="h-full bg-gradient-to-r from-orange-600 to-orange-400 rounded-full relative" 
                         style={{ width: `${played * 100}%` }}
                         layoutId="progress-bar"
-                      >
-                        <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-lg scale-0 group-hover/progress:scale-100 transition-transform" />
-                      </motion.div>
+                      />
                       {isBuffering && (
                         <motion.div
                           initial={{ x: '-100%' }}
                           animate={{ x: '100%' }}
                           transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
-                          className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent"
+                          className="absolute inset-0 bg-gradient-to-r from-transparent via-[var(--text-muted)] to-transparent"
                         />
                       )}
                     </div>
+                    <div 
+                      className="absolute h-3 w-3 bg-[var(--text-primary)] rounded-full shadow-lg scale-0 group-hover/scrubber:scale-100 transition-transform pointer-events-none z-0"
+                      style={{ left: `calc(${played * 100}% - 6px)` }}
+                    />
                   </div>
-                  <span className="text-[10px] font-mono text-white/30 w-10">{formatTime(duration)}</span>
+                  <span className="text-[10px] font-mono text-[var(--text-secondary)] w-10">{formatTime(duration)}</span>
                 </div>
               </div>
 
               <div className="flex items-center gap-4 flex-1 justify-end">
-                <div className="hidden md:flex items-center gap-3 group/volume bg-[var(--glass-bg)] px-3 py-2 rounded-xl border border-[var(--glass-border)]">
+                <div className="hidden md:flex items-center gap-3 group/volume bg-[var(--glass-bg)] px-3 py-2 rounded-xl border border-[var(--glass-border)] hover:border-[var(--glass-border)] transition-colors">
                   <button 
                     onClick={() => setIsMuted(!isMuted)}
                     className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                   >
                     {isMuted || volume === 0 ? <VolumeX size={16} /> : volume < 0.5 ? <Volume1 size={16} /> : <Volume2 size={16} />}
                   </button>
-                  <input 
-                    type="range" 
-                    min="0" 
-                    max="1" 
-                    step="0.01" 
-                    value={isMuted ? 0 : volume}
-                    onChange={handleVolumeChange}
-                    className="w-20 lg:w-32 h-1 bg-[var(--glass-border)] rounded-full appearance-none cursor-pointer accent-orange-500 hover:bg-[var(--glass-border)] transition-colors"
-                  />
+                  <div className="relative flex items-center w-20 lg:w-32 h-4">
+                    <input 
+                      type="range" 
+                      min="0" 
+                      max="1" 
+                      step="0.01" 
+                      value={isMuted ? 0 : volume}
+                      onChange={handleVolumeChange}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                    />
+                    <div className="w-full h-1 bg-[var(--glass-border)] rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-orange-500 rounded-full"
+                        style={{ width: `${(isMuted ? 0 : volume) * 100}%` }}
+                      />
+                    </div>
+                    <div 
+                      className="absolute h-2.5 w-2.5 bg-[var(--text-primary)] rounded-full shadow-lg scale-0 group-hover/volume:scale-100 transition-transform pointer-events-none"
+                      style={{ left: `calc(${(isMuted ? 0 : volume) * 100}% - 5px)` }}
+                    />
+                  </div>
                 </div>
                 <button
                   onClick={() => currentSong && handleShowLyrics(currentSong)}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 hover:text-white transition-all border border-white/10"
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[var(--glass-bg)] hover:bg-[var(--glass-border)] text-[var(--text-primary)] hover:text-[var(--text-primary)] transition-all border border-[var(--glass-border)]"
                 >
                   <Quote size={16} />
                   <span className="text-xs font-bold uppercase tracking-wider hidden md:inline">Lyrics</span>
                 </button>
                 <button 
                   onClick={() => setCurrentSong(null)}
-                  className="p-2 rounded-lg hover:bg-white/10 text-white/20 hover:text-white transition-all"
+                  className="p-2 rounded-lg hover:bg-[var(--glass-border)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all"
                 >
                   <X size={18} />
                 </button>
@@ -1792,8 +2039,8 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <footer className="max-w-4xl mx-auto px-6 py-12 text-center text-white/20 text-xs font-mono uppercase tracking-widest border-t border-white/5">
-        Moodify &copy; {new Date().getFullYear()} • Powered by Gemini AI
+      <footer className="max-w-4xl mx-auto px-6 py-12 text-center text-[var(--text-muted)] text-xs font-mono uppercase tracking-widest border-t border-[var(--glass-border)]">
+        NEUROTUNES &copy; {new Date().getFullYear()} • Powered by Gemini AI
       </footer>
     </div>
     </ErrorBoundary>

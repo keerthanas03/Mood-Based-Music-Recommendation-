@@ -69,6 +69,7 @@ export async function getMusicRecommendations(mood: string, userProfile?: UserPr
     5. reason: Why it fits the ${activity ? 'activity and mood' : 'mood'}
     6. youtubeUrl: A direct, valid YouTube video URL (e.g., https://www.youtube.com/watch?v=VIDEO_ID). This is CRITICAL for the app's player to work. Search your knowledge for the most popular official video or lyrical video link for each song.`,
     config: {
+      tools: [{ googleSearch: {} }],
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
@@ -133,6 +134,7 @@ export async function searchSongs(query: string): Promise<PlaylistResponse> {
     5. reason: Why this song matches the search query
     6. youtubeUrl: A direct, valid YouTube video URL (e.g., https://www.youtube.com/watch?v=VIDEO_ID). Search your knowledge for the most popular official video or lyrical video link for each song.`,
     config: {
+      tools: [{ googleSearch: {} }],
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,

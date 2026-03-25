@@ -34,6 +34,31 @@
         }
       },
       "required": ["userId", "mood", "timestamp", "recommendations"]
+    },
+    "SavedPlaylist": {
+      "title": "Saved Playlist",
+      "description": "A user-saved playlist of recommended songs",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The ID of the user" },
+        "name": { "type": "string", "description": "Name of the playlist" },
+        "mood": { "type": "string", "description": "The mood associated with the playlist" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "When the playlist was saved" },
+        "songs": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "artist": { "type": "string" },
+              "duration": { "type": "string" },
+              "reason": { "type": "string" },
+              "youtubeUrl": { "type": "string" }
+            }
+          }
+        }
+      },
+      "required": ["userId", "name", "mood", "timestamp", "songs"]
     }
   },
   "firestore": {
@@ -44,6 +69,10 @@
     "/history/{historyId}": {
       "schema": "HistoryEntry",
       "description": "Listening history records"
+    },
+    "/playlists/{playlistId}": {
+      "schema": "SavedPlaylist",
+      "description": "User saved playlists"
     }
   }
 }
