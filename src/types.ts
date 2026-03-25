@@ -29,3 +29,5 @@ export interface HistoryEntry {
 }
 
 export type MoodType = 'Energetic' | 'Relaxed' | 'Melancholic' | 'Focused' | 'Romantic' | 'Adventurous' | 'Happy' | 'Angry' | 'Spiritual' | 'Nostalgic' | 'Party' | 'Epic' | 'Custom';
+
+export type ActivityType = 'Workout' | 'Study' | 'Relax' | 'Commute' | 'Party' | 'Cooking' | 'Driving' | 'Sleeping' | 'Gaming';

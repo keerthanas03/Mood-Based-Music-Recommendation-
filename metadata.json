@@ -1,5 +1,5 @@
 {
-  "name": "Moodify",
-  "description": "AI-powered mood-based music recommendations to match your current vibe.",
+  "name": "Moodify Tamil",
+  "description": "Premium AI-powered music recommendations for Kollywood fans. Discover the perfect Tamil soundtrack for every mood with sonic analysis and camera-based emotion detection.",
   "requestFramePermissions": ["camera"]
 }

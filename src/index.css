@@ -14,15 +14,32 @@
     --accent-secondary: #4a103a;
     --glow-color: #3a1510;
     --text-primary: #ffffff;
-    --text-secondary: rgba(255, 255, 255, 0.6);
+    --text-secondary: rgba(255, 255, 255, 0.7);
+    --text-muted: rgba(255, 255, 255, 0.3);
     --glass-bg: rgba(255, 255, 255, 0.05);
     --glass-border: rgba(255, 255, 255, 0.1);
+    --card-bg: rgba(255, 255, 255, 0.03);
+    --shadow-color: rgba(0, 0, 0, 0.5);
+  }
+
+  .light {
+    --bg-color: #f8f9fa;
+    --accent-primary: #ff4e00;
+    --accent-secondary: #e0e0e0;
+    --glow-color: #ffe0d0;
+    --text-primary: #1a1a1a;
+    --text-secondary: rgba(0, 0, 0, 0.7);
+    --text-muted: rgba(0, 0, 0, 0.3);
+    --glass-bg: rgba(0, 0, 0, 0.03);
+    --glass-border: rgba(0, 0, 0, 0.1);
+    --card-bg: rgba(0, 0, 0, 0.02);
+    --shadow-color: rgba(0, 0, 0, 0.1);
   }
 
   body {
     background-color: var(--bg-color);
     color: var(--text-primary);
-    @apply min-h-screen overflow-x-hidden transition-colors duration-500 selection:bg-orange-500/30;
+    @apply min-h-screen overflow-x-hidden transition-all duration-500 selection:bg-orange-500/30;
   }
 
   /* Custom Scrollbar */
@@ -68,14 +85,14 @@
   background-color: var(--glass-bg);
   backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  box-shadow: 0 8px 32px 0 var(--shadow-color);
 }
 
 .glass-card {
   background-color: var(--glass-bg);
   backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  box-shadow: 0 8px 32px 0 var(--shadow-color);
   @apply rounded-3xl transition-all duration-500;
   background: linear-gradient(135deg, var(--glass-bg), rgba(255, 255, 255, 0.02));
 }

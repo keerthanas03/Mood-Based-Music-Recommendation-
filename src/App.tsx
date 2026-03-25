@@ -36,13 +36,29 @@ import {
   SkipBack,
   SkipForward,
   Pause,
-  Quote
+  Quote,
+  Download,
+  Wifi,
+  WifiOff,
+  Trash2,
+  Dumbbell,
+  BookOpen,
+  Bed,
+  Train,
+  PartyPopper,
+  Utensils,
+  Car,
+  Gamepad2,
+  ListMusic
 } from 'lucide-react';
-import { getMusicRecommendations, detectEmotionFromImage, getLyrics } from './services/gemini';
+import { getMusicRecommendations, detectEmotionFromImage, getLyrics, searchSongs } from './services/gemini';
 import ReactPlayer from 'react-player';
-import { Song, PlaylistResponse, MoodType, UserProfile, HistoryEntry } from './types';
+import { Song, PlaylistResponse, MoodType, ActivityType, UserProfile, HistoryEntry } from './types';
 import CameraCapture from './components/CameraCapture';
+import Visualizer from './components/Visualizer';
 import { auth, db, signIn, logout, handleFirestoreError, OperationType } from './firebase';
+import { db_local, type DownloadedSong } from './lib/db';
+import { useLiveQuery } from 'dexie-react-hooks';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { doc, onSnapshot, setDoc, collection, addDoc, query, where, orderBy, limit } from 'firebase/firestore';
 
@@ -61,20 +77,24 @@ interface Theme {
   };
 }
 
-class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; errorInfo: string | null }> {
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: any | null; showDetails: boolean }> {
   constructor(props: { children: React.ReactNode }) {
     super(props);
-    this.state = { hasError: false, errorInfo: null };
+    this.state = { hasError: false, error: null, showDetails: false };
   }
 
   static getDerivedStateFromError(error: any) {
-    return { hasError: true, errorInfo: error.message };
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: any, errorInfo: any) {
+    console.error("ErrorBoundary caught an error:", error, errorInfo);
   }
 
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen flex items-center justify-center p-6 bg-[#0a0502] text-white font-sans">
+        <div className="min-h-screen flex items-center justify-center p-6 bg-[var(--bg-color)] text-[var(--text-primary)] font-sans">
           <div className="glass-card p-8 max-w-md w-full text-center">
             <div className="w-16 h-16 bg-rose-500/20 text-rose-400 rounded-2xl flex items-center justify-center mx-auto mb-6">
               <X size={32} />
@@ -83,23 +103,35 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
             <p className="text-white/50 text-sm mb-6 leading-relaxed">
               We encountered an unexpected error. This might be due to a connection issue or a temporary glitch.
             </p>
-            {this.state.errorInfo && (
-              <div className="bg-black/40 p-4 rounded-xl mb-6 text-left overflow-hidden">
-                <p className="text-[10px] font-mono text-rose-400/70 break-all line-clamp-3">
-                  {this.state.errorInfo}
-                </p>
-              </div>
-            )}
-            <button
-              onClick={() => window.location.reload()}
-              className="w-full py-3 rounded-xl bg-white text-black font-bold hover:bg-orange-500 hover:text-white transition-all"
-            >
-              Try Again
-            </button>
+            
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={() => window.location.reload()}
+                className="w-full py-4 rounded-2xl bg-white text-black font-bold uppercase tracking-widest text-xs hover:bg-orange-500 hover:text-white transition-all"
+              >
+                Reload Application
+              </button>
+              
+              <button
+                onClick={() => this.setState({ showDetails: !this.state.showDetails })}
+                className="text-white/30 text-[10px] font-mono uppercase tracking-widest hover:text-white transition-all"
+              >
+                {this.state.showDetails ? 'Hide Details' : 'Show Details'}
+              </button>
+
+              {this.state.showDetails && (
+                <div className="mt-4 p-4 rounded-xl bg-black/40 border border-white/10 text-left overflow-auto max-h-40">
+                  <pre className="text-[10px] font-mono text-rose-400/80 whitespace-pre-wrap">
+                    {this.state.error?.stack || this.state.error?.message || 'No stack trace available'}
+                  </pre>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       );
     }
+
     return this.props.children;
   }
 }
@@ -162,14 +194,38 @@ const MOODS: { type: MoodType; icon: React.ReactNode; color: string }[] = [
   { type: 'Epic', icon: <Crown size={20} />, color: 'from-yellow-600 to-amber-800' },
 ];
 
+const ACTIVITIES: { type: ActivityType; icon: React.ReactNode; color: string }[] = [
+  { type: 'Workout', icon: <Dumbbell size={20} />, color: 'from-orange-500 to-red-600' },
+  { type: 'Study', icon: <BookOpen size={20} />, color: 'from-blue-500 to-indigo-600' },
+  { type: 'Relax', icon: <Bed size={20} />, color: 'from-teal-400 to-emerald-500' },
+  { type: 'Commute', icon: <Train size={20} />, color: 'from-slate-500 to-gray-700' },
+  { type: 'Party', icon: <PartyPopper size={20} />, color: 'from-pink-500 to-rose-600' },
+  { type: 'Cooking', icon: <Utensils size={20} />, color: 'from-amber-400 to-orange-500' },
+  { type: 'Driving', icon: <Car size={20} />, color: 'from-blue-600 to-cyan-700' },
+  { type: 'Sleeping', icon: <Moon size={20} />, color: 'from-indigo-800 to-black' },
+  { type: 'Gaming', icon: <Gamepad2 size={20} />, color: 'from-purple-600 to-fuchsia-700' },
+];
+
+const Player = ReactPlayer as any;
+
 export default function App() {
   const [selectedMood, setSelectedMood] = useState<MoodType | null>(null);
+  const [selectedActivity, setSelectedActivity] = useState<ActivityType | null>(null);
   const [customMood, setCustomMood] = useState('');
+  const [isSearchMode, setIsSearchMode] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'error' | 'success' | 'info' } | null>(null);
   const [playlist, setPlaylist] = useState<PlaylistResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
-  const [currentTheme, setCurrentTheme] = useState<Theme>(THEMES[0]);
+  const [currentTheme, setCurrentTheme] = useState<Theme>(() => {
+    const saved = localStorage.getItem('moodify_theme');
+    if (saved) {
+      const theme = THEMES.find(t => t.id === saved);
+      if (theme) return theme;
+    }
+    return THEMES[0];
+  });
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
 
@@ -195,6 +251,7 @@ export default function App() {
   const [favorites, setFavorites] = useState<Song[]>([]);
   const [showFavorites, setShowFavorites] = useState(false);
   const [isShared, setIsShared] = useState(false);
+  const [sharedSongId, setSharedSongId] = useState<string | null>(null);
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -209,9 +266,28 @@ export default function App() {
   const [isLyricsLoading, setIsLyricsLoading] = useState(false);
   const [played, setPlayed] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [playerError, setPlayerError] = useState<string | null>(null);
   const playerRef = useRef<any>(null);
-  const Player = ReactPlayer as any;
+  const [isBuffering, setIsBuffering] = useState(false);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [showDownloads, setShowDownloads] = useState(false);
+  const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
+
+  const downloads = useLiveQuery(() => db_local.downloads.toArray()) || [];
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
@@ -291,7 +367,13 @@ export default function App() {
   }, [isCameraOpen, isLoading]);
 
   useEffect(() => {
+    localStorage.setItem('moodify_theme', currentTheme.id);
     const root = document.documentElement;
+    if (currentTheme.id === 'daylight') {
+      root.classList.add('light');
+    } else {
+      root.classList.remove('light');
+    }
     root.style.setProperty('--bg-color', currentTheme.colors.bg);
     root.style.setProperty('--accent-primary', currentTheme.colors.primary);
     root.style.setProperty('--accent-secondary', currentTheme.colors.secondary);
@@ -306,8 +388,10 @@ export default function App() {
     setFavorites(prev => {
       const exists = prev.find(s => s.title === song.title && s.artist === song.artist);
       if (exists) {
+        showToast('Removed from favorites', 'info');
         return prev.filter(s => s.title !== song.title || s.artist !== song.artist);
       }
+      showToast('Added to favorites!', 'success');
       return [...prev, song];
     });
   };
@@ -319,13 +403,12 @@ export default function App() {
     return `${mm}:${ss}`;
   };
 
-  const handleShowLyrics = async () => {
-    if (!currentSong) return;
+  const handleShowLyrics = async (song: Song) => {
     setShowLyrics(true);
     setIsLyricsLoading(true);
     setLyrics(null);
     try {
-      const fetchedLyrics = await getLyrics(currentSong.title, currentSong.artist);
+      const fetchedLyrics = await getLyrics(song.title, song.artist);
       setLyrics(fetchedLyrics);
     } catch (error) {
       console.error("Failed to fetch lyrics:", error);
@@ -342,8 +425,88 @@ export default function App() {
     playerRef.current?.seekTo(percent);
   };
 
+  const handleNext = () => {
+    if (!playlist || !currentSong) return;
+    const currentIndex = playlist.songs.findIndex(s => s.title === currentSong.title && s.artist === currentSong.artist);
+    if (currentIndex === -1) return;
+    const nextIndex = (currentIndex + 1) % playlist.songs.length;
+    setCurrentSong(playlist.songs[nextIndex]);
+    setIsPlaying(true);
+    setPlayed(0);
+    setPlayerError(null);
+  };
+
+  const handlePrev = () => {
+    if (!playlist || !currentSong) return;
+    const currentIndex = playlist.songs.findIndex(s => s.title === currentSong.title && s.artist === currentSong.artist);
+    if (currentIndex === -1) return;
+    const prevIndex = (currentIndex - 1 + playlist.songs.length) % playlist.songs.length;
+    setCurrentSong(playlist.songs[prevIndex]);
+    setIsPlaying(true);
+    setPlayed(0);
+    setPlayerError(null);
+  };
+
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newVolume = parseFloat(e.target.value);
+    setVolume(newVolume);
+    if (newVolume > 0) setIsMuted(false);
+  };
+
   const isFavorite = (song: Song) => {
     return favorites.some(s => s.title === song.title && s.artist === song.artist);
+  };
+
+  const handleDownload = async (song: Song) => {
+    if (!isOnline) {
+      showToast("You need to be online to download songs.", "error");
+      return;
+    }
+    if (!song.youtubeUrl) return;
+    
+    const songId = `${song.title}-${song.artist}`;
+    setDownloadingIds(prev => new Set(prev).add(songId));
+    
+    try {
+      // Check if already downloaded
+      const existing = await db_local.downloads
+        .where('title').equals(song.title)
+        .and(s => s.artist === song.artist)
+        .first();
+        
+      if (existing) {
+        showToast("Song is already in your downloads!", "info");
+        return;
+      }
+
+      await db_local.downloads.add({
+        ...song,
+        downloadedAt: new Date().toISOString()
+      });
+      
+      showToast(`"${song.title}" added to offline library`, "success");
+    } catch (e) {
+      console.error("Download failed:", e);
+      showToast("Download failed. Please try again.", "error");
+    } finally {
+      setDownloadingIds(prev => {
+        const next = new Set(prev);
+        next.delete(songId);
+        return next;
+      });
+    }
+  };
+
+  const removeDownload = async (id: number) => {
+    try {
+      await db_local.downloads.delete(id);
+    } catch (e) {
+      console.error("Failed to remove download:", e);
+    }
+  };
+
+  const isDownloaded = (song: Song) => {
+    return downloads.some(s => s.title === song.title && s.artist === song.artist);
   };
 
   const handleShare = () => {
@@ -352,31 +515,75 @@ export default function App() {
     const text = `Mood: ${playlist.mood}\n\nRecommended Tamil Songs:\n${songList}\n\nGenerated by Moodify Tamil`;
     navigator.clipboard.writeText(text);
     setIsShared(true);
+    showToast("Playlist copied to clipboard!", "success");
     setTimeout(() => setIsShared(false), 2000);
   };
 
-  const handleGenerate = async (moodToUse: string) => {
+  const handleShareSong = async (song: Song) => {
+    const text = `Check out this song: "${song.title}" by ${song.artist} on Moodify Tamil!\n\nListen here: ${song.youtubeUrl || `https://www.youtube.com/results?search_query=${encodeURIComponent(`${song.title} ${song.artist}`)}`}`;
+    
+    const showFeedback = () => {
+      setSharedSongId(`${song.title}-${song.artist}`);
+      showToast("Song link copied!", "success");
+      setTimeout(() => setSharedSongId(null), 2000);
+    };
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: song.title,
+          text: text,
+          url: song.youtubeUrl
+        });
+        showFeedback();
+      } catch (err) {
+        if ((err as Error).name !== 'AbortError') {
+          console.error('Error sharing:', err);
+          // Fallback to clipboard if share fails
+          navigator.clipboard.writeText(text);
+          showFeedback();
+        }
+      }
+    } else {
+      navigator.clipboard.writeText(text);
+      showFeedback();
+    }
+  };
+
+  const showToast = (message: string, type: 'error' | 'success' | 'info' = 'info') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 5000);
+  };
+
+  const handleGenerate = async (moodToUse: string, activityToUse?: string) => {
+    if (!isOnline) {
+      showToast('You are offline. Please check your connection to generate new playlists.', 'error');
+      return;
+    }
     setIsLoading(true);
     setError(null);
     try {
-      const result = await getMusicRecommendations(moodToUse, userProfile || undefined);
+      const result = await getMusicRecommendations(moodToUse, userProfile || undefined, activityToUse);
       setPlaylist(result);
       
       // Save to history if user is logged in
       if (user) {
         const historyEntry: Omit<HistoryEntry, 'id'> = {
           userId: user.uid,
-          mood: moodToUse,
+          mood: activityToUse ? `${activityToUse} (${moodToUse})` : moodToUse,
           timestamp: new Date().toISOString(),
           recommendations: result.songs
         };
-        await addDoc(collection(db, 'history'), historyEntry).catch(e => 
-          handleFirestoreError(e, OperationType.CREATE, 'history')
-        );
+        await addDoc(collection(db, 'history'), historyEntry).catch(e => {
+          console.error("History save error:", e);
+          handleFirestoreError(e, OperationType.CREATE, 'history');
+        });
       }
-    } catch (err) {
-      setError('Failed to find the right vibes. Please try again.');
-      console.error(err);
+    } catch (err: any) {
+      const msg = err.message || 'Failed to find the right vibes. Please try again.';
+      setError(msg);
+      showToast(msg, 'error');
+      console.error("Generation Error:", err);
     } finally {
       setIsLoading(false);
     }
@@ -384,13 +591,47 @@ export default function App() {
 
   const handleMoodClick = (mood: MoodType) => {
     setSelectedMood(mood);
-    handleGenerate(mood);
+    handleGenerate(mood, selectedActivity || undefined);
+  };
+
+  const handleActivityClick = (activity: ActivityType) => {
+    const newActivity = selectedActivity === activity ? null : activity;
+    setSelectedActivity(newActivity);
+    if (selectedMood) {
+      handleGenerate(selectedMood, newActivity || undefined);
+    } else if (customMood.trim()) {
+      handleGenerate(customMood, newActivity || undefined);
+    }
   };
 
   const handleCustomSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (customMood.trim()) {
-      handleGenerate(customMood);
+      if (isSearchMode) {
+        handleSearch(customMood);
+      } else {
+        handleGenerate(customMood, selectedActivity || undefined);
+      }
+    }
+  };
+
+  const handleSearch = async (query: string) => {
+    if (!isOnline) {
+      showToast('You are offline. Please check your connection to search for songs.', 'error');
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      const result = await searchSongs(query);
+      setPlaylist(result);
+    } catch (err: any) {
+      const msg = err.message || 'Could not find any songs matching your search. Please try again.';
+      setError(msg);
+      showToast(msg, 'error');
+      console.error("Search Error:", err);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -418,9 +659,11 @@ export default function App() {
       setCustomMood(detectedMood);
       setIsCameraOpen(false);
       await handleGenerate(detectedMood);
-    } catch (err) {
-      setError('Could not read your expression. Try again?');
-      console.error(err);
+    } catch (err: any) {
+      const msg = err.message || 'Could not read your expression. Try again?';
+      setError(msg);
+      showToast(msg, 'error');
+      console.error("Camera Capture Error:", err);
     } finally {
       setIsLoading(false);
     }
@@ -431,6 +674,43 @@ export default function App() {
       <div className="relative min-h-screen font-sans">
       <div className="noise" />
       <div className="atmosphere" />
+
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: 50, x: '-50%' }}
+            animate={{ opacity: 1, y: 0, x: '-50%' }}
+            exit={{ opacity: 0, y: 20, x: '-50%' }}
+            className={`fixed bottom-24 left-1/2 z-[1000] px-6 py-3 rounded-2xl glass flex items-center gap-3 shadow-2xl border-white/20 min-w-[300px] ${
+              toast.type === 'error' ? 'border-rose-500/50' : toast.type === 'success' ? 'border-emerald-500/50' : 'border-blue-500/50'
+            }`}
+          >
+            <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+              toast.type === 'error' ? 'bg-rose-500/20 text-rose-400' : toast.type === 'success' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-blue-500/20 text-blue-400'
+            }`}>
+              {toast.type === 'error' ? <X size={18} /> : toast.type === 'success' ? <Check size={18} /> : <Sparkles size={18} />}
+            </div>
+            <p className="text-sm font-medium text-white/90">{toast.message}</p>
+            <button onClick={() => setToast(null)} className="ml-auto text-white/20 hover:text-white transition-colors">
+              <X size={14} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {!isOnline && (
+          <motion.div
+            initial={{ y: -100 }}
+            animate={{ y: 0 }}
+            exit={{ y: -100 }}
+            className="fixed top-0 left-0 right-0 z-[100] bg-orange-500 text-white py-2 text-center text-xs font-mono uppercase tracking-widest flex items-center justify-center gap-2"
+          >
+            <WifiOff size={14} />
+            You are currently offline. Accessing downloaded songs only.
+          </motion.div>
+        )}
+      </AnimatePresence>
       
       <main className="max-w-5xl mx-auto px-6 py-12 md:py-24 relative z-10">
         {/* Top Controls */}
@@ -442,7 +722,7 @@ export default function App() {
                   <button
                     onClick={() => setShowHistory(!showHistory)}
                     className={`p-3 rounded-full glass transition-all ${
-                      showHistory ? 'text-orange-400 bg-white/10' : 'text-white/70 hover:text-white'
+                      showHistory ? 'text-orange-400 bg-[var(--glass-bg)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                     }`}
                     title="History"
                   >
@@ -450,14 +730,14 @@ export default function App() {
                   </button>
                   <button
                     onClick={() => setIsProfileModalOpen(true)}
-                    className="p-3 rounded-full glass text-white/70 hover:text-white transition-all"
+                    className="p-3 rounded-full glass text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all"
                     title="Profile"
                   >
                     <UserCircle size={20} />
                   </button>
                   <button
                     onClick={logout}
-                    className="p-3 rounded-full glass text-white/70 hover:text-rose-400 transition-all"
+                    className="p-3 rounded-full glass text-[var(--text-secondary)] hover:text-rose-400 transition-all"
                     title="Logout"
                   >
                     <LogOut size={20} />
@@ -466,7 +746,7 @@ export default function App() {
               ) : (
                 <button
                   onClick={signIn}
-                  className="px-4 py-2 rounded-full glass text-white/70 hover:text-white transition-all flex items-center gap-2 text-sm font-medium"
+                  className="px-4 py-2 rounded-full glass text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all flex items-center gap-2 text-sm font-medium"
                 >
                   <User size={18} />
                   Login
@@ -478,17 +758,39 @@ export default function App() {
           <button
             onClick={() => setShowFavorites(!showFavorites)}
             className={`p-3 rounded-full glass transition-all ${
-              showFavorites ? 'text-orange-400 bg-white/10' : 'text-white/70 hover:text-white'
+              showFavorites ? 'text-orange-400 bg-[var(--glass-bg)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
             }`}
             title="Favorites"
           >
             <Heart size={20} fill={showFavorites ? "currentColor" : "none"} />
           </button>
+
+          <button
+            onClick={() => setShowDownloads(!showDownloads)}
+            className={`p-3 rounded-full glass transition-all ${
+              showDownloads ? 'text-orange-400 bg-[var(--glass-bg)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+            title="Downloads"
+          >
+            <Download size={20} />
+          </button>
           
+          <button
+            onClick={() => {
+              const isDark = currentTheme.id === 'midnight';
+              const nextTheme = THEMES.find(t => t.id === (isDark ? 'daylight' : 'midnight')) || THEMES[0];
+              setCurrentTheme(nextTheme);
+            }}
+            className="p-3 rounded-full glass text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all"
+            title={currentTheme.id === 'midnight' ? "Switch to Light Mode" : "Switch to Dark Mode"}
+          >
+            {currentTheme.id === 'midnight' ? <Sun size={20} /> : <Moon size={20} />}
+          </button>
+
           <div className="relative">
             <button
               onClick={() => setIsThemeMenuOpen(!isThemeMenuOpen)}
-              className="p-3 rounded-full glass text-white/70 hover:text-white transition-all"
+              className="p-3 rounded-full glass text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all"
               title="Change Theme"
             >
               <Palette size={20} />
@@ -542,9 +844,9 @@ export default function App() {
             <h1 className="text-5xl md:text-7xl font-serif font-black mb-8 tracking-tighter leading-none" style={{ color: 'var(--text-primary)' }}>
               Mood<span className="italic text-gradient">ify</span> <span className="text-xl md:text-2xl align-top text-orange-400/30 font-sans font-light tracking-widest">TAMIL</span>
             </h1>
-            <p className="text-xl max-w-2xl mx-auto font-light leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
-              The ultimate soundtrack for your soul. Tell us how you feel, and we'll find the perfect Kollywood hits for your moment.
-            </p>
+                <p className="text-xl max-w-2xl mx-auto font-light leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+                  The ultimate soundtrack for your soul. Tell us how you feel, and we'll find the perfect Kollywood hits for your moment.
+                </p>
           </motion.div>
         </header>
 
@@ -580,6 +882,15 @@ export default function App() {
                           <button onClick={() => toggleFavorite(song)} className="text-rose-400">
                             <Heart size={16} fill="currentColor" />
                           </button>
+                          <button
+                            onClick={() => handleShareSong(song)}
+                            className={`p-2 rounded-lg transition-all ${
+                              sharedSongId === `${song.title}-${song.artist}` ? 'text-emerald-400 bg-emerald-400/10' : 'text-white/30 hover:text-white'
+                            }`}
+                            title="Share Song"
+                          >
+                            {sharedSongId === `${song.title}-${song.artist}` ? <Check size={16} /> : <Share2 size={16} />}
+                          </button>
                           <a
                             href={`https://open.spotify.com/search/${encodeURIComponent(`${song.title} ${song.artist}`)}`}
                             target="_blank"
@@ -598,8 +909,72 @@ export default function App() {
           )}
         </AnimatePresence>
 
+        {/* Downloads View */}
+        <AnimatePresence>
+          {showDownloads && (
+            <motion.section
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mb-12 overflow-hidden"
+            >
+              <div className="glass p-8 rounded-3xl">
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-serif font-bold flex items-center gap-2">
+                    <Download size={20} className="text-orange-400" />
+                    Offline Downloads
+                  </h2>
+                  <button onClick={() => setShowDownloads(false)} className="text-sm text-white/40 hover:text-white">Close</button>
+                </div>
+                
+                {downloads.length === 0 ? (
+                  <p className="text-center py-10 text-white/30 italic">No offline songs yet. Download some songs to access them offline!</p>
+                ) : (
+                  <div className="grid gap-3">
+                    {downloads.map((song, index) => (
+                      <div key={`dl-${index}`} className="flex items-center gap-4 p-3 rounded-xl bg-white/5 border border-white/5">
+                        <div className="flex-1 min-w-0">
+                          <h4 className="font-medium truncate">{song.title}</h4>
+                          <p className="text-xs text-white/40 truncate">{song.artist}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setCurrentSong(song);
+                              setIsPlaying(true);
+                              setPlayed(0);
+                              setPlayerError(null);
+                            }}
+                            className={`p-2 rounded-lg transition-all ${
+                              currentSong?.title === song.title ? 'text-orange-400 bg-orange-400/10' : 'text-white/30 hover:text-white'
+                            }`}
+                            title="Play"
+                          >
+                            <Play size={16} fill={currentSong?.title === song.title ? "currentColor" : "none"} />
+                          </button>
+                          <button 
+                            onClick={() => song.id && removeDownload(song.id)} 
+                            className="p-2 rounded-lg text-white/30 hover:text-rose-400 transition-all"
+                            title="Remove Download"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </motion.section>
+          )}
+        </AnimatePresence>
+
         {/* Mood Selection */}
         <section className="mb-20">
+          <div className="flex items-center gap-2 mb-6">
+            <Sparkles size={20} className="text-orange-400" />
+            <h2 className="text-xl font-serif font-bold tracking-tight">Select Your Mood</h2>
+          </div>
           <div className="bento-grid mb-12">
             {MOODS.map((mood, index) => (
               <motion.button
@@ -623,19 +998,63 @@ export default function App() {
             ))}
           </div>
 
+          <div className="flex items-center gap-2 mb-6">
+            <Music2 size={20} className="text-orange-400" />
+            <h2 className="text-xl font-serif font-bold tracking-tight">What are you doing?</h2>
+          </div>
+          <div className="flex flex-wrap gap-4 mb-12">
+            {ACTIVITIES.map((activity, index) => (
+              <motion.button
+                key={activity.type}
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ delay: index * 0.05 }}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => handleActivityClick(activity.type)}
+                disabled={isLoading}
+                className={`flex items-center gap-3 px-6 py-3 rounded-2xl glass transition-all ${
+                  selectedActivity === activity.type 
+                    ? `bg-gradient-to-r ${activity.color} text-white shadow-lg` 
+                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/5'
+                }`}
+              >
+                <div className={selectedActivity === activity.type ? 'text-white' : 'text-orange-400'}>
+                  {activity.icon}
+                </div>
+                <span className="text-sm font-bold uppercase tracking-wider">{activity.type}</span>
+              </motion.button>
+            ))}
+          </div>
+
           <form onSubmit={handleCustomSubmit} className="relative max-w-2xl mx-auto flex flex-col md:flex-row gap-4">
             <div className="relative flex-1 group">
               <input
                 type="text"
                 value={customMood}
                 onChange={(e) => setCustomMood(e.target.value)}
-                placeholder="Describe your vibe..."
-                className="w-full bg-white/5 border border-white/10 rounded-2xl py-5 pl-14 pr-6 focus:outline-none focus:ring-2 focus:ring-orange-500/50 transition-all placeholder:text-white/20 text-lg"
+                placeholder={isSearchMode ? "Search for a song or artist..." : "Describe your vibe..."}
+                className="w-full bg-[var(--card-bg)] border border-[var(--glass-border)] rounded-2xl py-5 pl-14 pr-6 focus:outline-none focus:ring-2 focus:ring-orange-500/50 transition-all placeholder:text-[var(--text-muted)] text-[var(--text-primary)] text-lg"
               />
-              <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-white/20 group-focus-within:text-orange-400 transition-colors" size={24} />
+              {isSearchMode ? (
+                <Music className="absolute left-5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] group-focus-within:text-orange-400 transition-colors" size={24} />
+              ) : (
+                <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] group-focus-within:text-orange-400 transition-colors" size={24} />
+              )}
             </div>
             
             <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setIsSearchMode(!isSearchMode)}
+                className={`p-5 rounded-2xl glass transition-all flex items-center justify-center ${
+                  isSearchMode ? 'bg-orange-500 text-white' : 'text-white/50 hover:text-white'
+                }`}
+                title={isSearchMode ? "Switch to Mood Search" : "Switch to Song Search"}
+              >
+                {isSearchMode ? <Music size={24} /> : <ListMusic size={24} />}
+              </button>
+
               <button
                 type="button"
                 onClick={() => setIsCameraOpen(true)}
@@ -649,9 +1068,9 @@ export default function App() {
               <button
                 type="submit"
                 disabled={isLoading || !customMood.trim()}
-                className="flex-1 md:flex-none bg-white text-black px-10 rounded-2xl font-bold hover:bg-orange-500 hover:text-white transition-all duration-500 disabled:opacity-50 disabled:cursor-not-allowed shadow-xl hover:shadow-orange-500/20"
+                className="flex-1 md:flex-none bg-[var(--text-primary)] text-[var(--bg-color)] px-10 rounded-2xl font-bold hover:bg-orange-500 hover:text-white transition-all duration-500 disabled:opacity-50 disabled:cursor-not-allowed shadow-xl hover:shadow-orange-500/20"
               >
-                {isLoading ? <RefreshCw className="animate-spin" size={20} /> : 'FIND VIBE'}
+                {isLoading ? <RefreshCw className="animate-spin" size={20} /> : (isSearchMode ? 'SEARCH' : 'FIND VIBE')}
               </button>
             </div>
           </form>
@@ -722,7 +1141,7 @@ export default function App() {
                       Current Mood
                     </div>
                     <h2 className="text-4xl md:text-5xl font-serif font-black mb-4 tracking-tight">Feeling {playlist.mood}</h2>
-                    <p className="text-white/60 italic text-lg leading-relaxed max-w-2xl">{playlist.description}</p>
+                      <p className="text-[var(--text-secondary)] italic text-lg leading-relaxed max-w-2xl">{playlist.description}</p>
                   </div>
                   <button
                     onClick={handleShare}
@@ -744,16 +1163,22 @@ export default function App() {
                     whileHover={{ scale: 1.01, backgroundColor: 'rgba(255, 255, 255, 0.08)' }}
                     className="glass-card p-6 flex items-center gap-6 group cursor-default"
                   >
-                    <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center text-white/20 font-serif text-2xl font-black group-hover:bg-orange-500/20 group-hover:text-orange-400 transition-all duration-500 group-hover:scale-110 group-hover:rotate-3">
-                      {String(index + 1).padStart(2, '0')}
+                    <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center text-white/20 font-serif text-2xl font-black group-hover:bg-orange-500/20 group-hover:text-orange-400 transition-all duration-500 group-hover:scale-110 group-hover:rotate-3 relative overflow-hidden">
+                      {currentSong?.title === song.title && isPlaying && !isBuffering ? (
+                        <div className="absolute inset-0 flex items-end justify-center pb-2 px-2">
+                          <Visualizer isPlaying={isPlaying} isBuffering={isBuffering} barCount={8} />
+                        </div>
+                      ) : (
+                        String(index + 1).padStart(2, '0')
+                      )}
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-4 mb-1">
                         <h3 className="font-bold text-xl truncate group-hover:text-orange-400 transition-colors">{song.title}</h3>
                         <span className="text-white/30 text-xs font-mono shrink-0">{song.duration}</span>
                       </div>
-                      <p className="text-white/50 text-sm font-medium truncate mb-2">{song.artist} {song.album ? `• ${song.album}` : ''}</p>
-                      <div className="flex items-center gap-2 text-white/30 text-xs italic">
+                      <p className="text-[var(--text-muted)] text-sm font-medium truncate mb-2">{song.artist} {song.album ? `• ${song.album}` : ''}</p>
+                      <div className="flex items-center gap-2 text-[var(--text-muted)] text-xs italic">
                         <Sparkles size={12} className="text-orange-400/50" />
                         <p className="line-clamp-1">{song.reason}</p>
                       </div>
@@ -761,13 +1186,19 @@ export default function App() {
                     <div className="flex items-center gap-3">
                       <button
                         onClick={() => {
+                          if (!isOnline && !isDownloaded(song)) {
+                            alert("This song is not available offline. Please connect to the internet to play.");
+                            return;
+                          }
                           setCurrentSong(song);
                           setIsPlaying(true);
+                          setPlayed(0);
+                          setPlayerError(null);
                         }}
                         className={`p-3 rounded-xl transition-all ${
                           currentSong?.title === song.title ? 'bg-orange-500 text-white' : 'hover:bg-white/10 text-white/20 hover:text-white'
                         }`}
-                        title="Play in Moodify"
+                        title={isOnline ? "Play in Moodify" : isDownloaded(song) ? "Play Offline" : "Unavailable Offline"}
                       >
                         <Play size={20} fill={currentSong?.title === song.title ? "currentColor" : "none"} />
                       </button>
@@ -780,6 +1211,29 @@ export default function App() {
                         title={isFavorite(song) ? "Remove from Favorites" : "Add to Favorites"}
                       >
                         <Heart size={20} fill={isFavorite(song) ? "currentColor" : "none"} />
+                      </button>
+                      <div className="h-8 w-[1px] bg-white/10 mx-1" />
+                      <button
+                        onClick={() => handleDownload(song)}
+                        disabled={downloadingIds.has(`${song.title}-${song.artist}`)}
+                        className={`p-3 rounded-xl hover:bg-white/10 transition-all ${
+                          isDownloaded(song) ? 'text-orange-400 bg-orange-400/10' : 'text-white/20'
+                        }`}
+                        title={isDownloaded(song) ? "Downloaded" : "Download for Offline"}
+                      >
+                        {downloadingIds.has(`${song.title}-${song.artist}`) ? (
+                          <RefreshCw size={20} className="animate-spin" />
+                        ) : (
+                          <Download size={20} fill={isDownloaded(song) ? "currentColor" : "none"} />
+                        )}
+                      </button>
+                      <div className="h-8 w-[1px] bg-white/10 mx-1" />
+                      <button
+                        onClick={() => handleShowLyrics(song)}
+                        className="p-3 rounded-xl hover:bg-white/10 text-white/20 hover:text-white transition-all hover:scale-110"
+                        title="Show Lyrics"
+                      >
+                        <Quote size={20} />
                       </button>
                       <div className="h-8 w-[1px] bg-white/10 mx-1" />
                       <a
@@ -800,6 +1254,16 @@ export default function App() {
                       >
                         <ExternalLink size={20} />
                       </a>
+                      <div className="h-8 w-[1px] bg-white/10 mx-1" />
+                      <button
+                        onClick={() => handleShareSong(song)}
+                        className={`p-3 rounded-xl hover:bg-white/10 transition-all ${
+                          sharedSongId === `${song.title}-${song.artist}` ? 'text-emerald-400 bg-emerald-400/10' : 'text-white/20 hover:text-white'
+                        }`}
+                        title="Share Song"
+                      >
+                        {sharedSongId === `${song.title}-${song.artist}` ? <Check size={20} /> : <Share2 size={20} />}
+                      </button>
                     </div>
                   </motion.div>
                 ))}
@@ -983,17 +1447,41 @@ export default function App() {
                               onClick={() => {
                                 setCurrentSong(song);
                                 setIsPlaying(true);
+                                setPlayed(0);
+                                setPlayerError(null);
                                 setShowHistory(false);
                               }}
-                              className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-[10px] font-bold text-white/20 group-hover/song:bg-orange-500 group-hover/song:text-white transition-all"
+                              className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-[10px] font-bold text-white/20 group-hover/song:bg-orange-500 group-hover/song:text-white transition-all relative overflow-hidden"
                             >
-                              <Play size={12} fill="currentColor" className="hidden group-hover/song:block" />
-                              <span className="group-hover/song:hidden">{j + 1}</span>
+                              {currentSong?.title === song.title && isPlaying && !isBuffering ? (
+                                <div className="absolute inset-0 flex items-end justify-center pb-1 px-1">
+                                  <Visualizer isPlaying={isPlaying} isBuffering={isBuffering} barCount={4} />
+                                </div>
+                              ) : (
+                                <>
+                                  <Play size={12} fill="currentColor" className="hidden group-hover/song:block" />
+                                  <span className="group-hover/song:hidden">{j + 1}</span>
+                                </>
+                              )}
                             </button>
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center justify-between gap-2">
                                 <p className="font-bold truncate">{song.title}</p>
-                                <span className="text-[10px] text-white/20 font-mono shrink-0">{song.duration}</span>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleShareSong(song);
+                                    }}
+                                    className={`p-1 rounded transition-all ${
+                                      sharedSongId === `${song.title}-${song.artist}` ? 'text-emerald-400' : 'text-white/20 hover:text-white'
+                                    }`}
+                                    title="Share Song"
+                                  >
+                                    {sharedSongId === `${song.title}-${song.artist}` ? <Check size={12} /> : <Share2 size={12} />}
+                                  </button>
+                                  <span className="text-[10px] text-white/20 font-mono shrink-0">{song.duration}</span>
+                                </div>
                               </div>
                               <p className="text-white/40 text-xs truncate">{song.artist}</p>
                             </div>
@@ -1048,8 +1536,17 @@ export default function App() {
                     <p className="text-white/40 font-mono text-xs uppercase tracking-widest">Fetching lyrics...</p>
                   </div>
                 ) : (
-                  <div className="whitespace-pre-wrap text-lg leading-relaxed text-white/80 font-serif italic text-center">
-                    {lyrics}
+                  <div className="whitespace-pre-wrap text-lg leading-relaxed text-white/80 font-serif italic text-center selection:bg-orange-500/30">
+                    {lyrics?.split('\n').map((line, i) => {
+                      if (line.startsWith('[') && line.endsWith(']')) {
+                        return (
+                          <div key={i} className="mt-8 mb-4 text-orange-400 font-mono text-xs uppercase tracking-[0.3em] font-bold border-b border-orange-500/20 pb-2">
+                            {line.slice(1, -1)}
+                          </div>
+                        );
+                      }
+                      return <p key={i} className="mb-1">{line}</p>;
+                    })}
                   </div>
                 )}
               </div>
@@ -1072,104 +1569,217 @@ export default function App() {
             exit={{ y: 100, opacity: 0 }}
             className="fixed bottom-0 left-0 right-0 z-[150] p-4 md:p-6"
           >
-            <div className="max-w-5xl mx-auto glass-card p-4 flex items-center justify-between gap-6 shadow-2xl border-white/20">
+            <div className="max-w-5xl mx-auto glass-card p-4 flex items-center justify-between gap-6 shadow-2xl border-white/20 relative overflow-hidden">
+              {/* Subtle Background Visualizer */}
+              <div className="absolute inset-0 -z-10 flex items-end justify-center px-10 pb-2">
+                <Visualizer 
+                  isPlaying={isPlaying} 
+                  isBuffering={isBuffering} 
+                  barCount={60} 
+                />
+              </div>
+
               <div className="flex items-center gap-4 min-w-0 flex-1">
                 <div className="w-12 h-12 rounded-xl bg-orange-500/20 flex items-center justify-center text-orange-400 shrink-0">
                   <Music size={24} />
                 </div>
                 <div className="min-w-0">
-                  <h4 className="font-bold text-sm truncate">{currentSong.title}</h4>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-bold text-sm truncate">{currentSong.title}</h4>
+                  </div>
                   <p className="text-white/40 text-xs truncate">{currentSong.artist}</p>
+                  {playerError ? (
+                    <div className="flex items-center gap-2 mt-1">
+                      <p className="text-rose-400 text-[10px] font-mono uppercase tracking-widest animate-pulse">
+                        {playerError}
+                      </p>
+                      <a 
+                        href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`${currentSong.title} ${currentSong.artist}`)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-orange-400 hover:text-orange-300 transition-colors flex items-center gap-1"
+                      >
+                        <span className="text-[8px]">SEARCH</span>
+                        <ExternalLink size={10} />
+                      </a>
+                    </div>
+                  ) : !currentSong.youtubeUrl && (
+                    <div className="flex items-center gap-2 mt-1">
+                      <p className="text-white/20 text-[10px] font-mono uppercase tracking-widest">
+                        No direct link
+                      </p>
+                      <a 
+                        href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`${currentSong.title} ${currentSong.artist}`)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-orange-400 hover:text-orange-300 transition-colors flex items-center gap-1"
+                      >
+                        <span className="text-[8px]">SEARCH</span>
+                        <ExternalLink size={10} />
+                      </a>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div className="flex flex-col items-center gap-2 flex-1">
-                <div className="hidden">
-                  {Player && (
+              <div className="flex flex-col items-center gap-2 flex-1 max-w-2xl relative">
+                <div className="absolute opacity-0 -z-50 overflow-hidden w-1 h-1">
+                  {ReactPlayer && currentSong && (
                     <Player
+                      key={currentSong.youtubeUrl}
                       ref={playerRef}
-                      url={currentSong.youtubeUrl || `https://www.youtube.com/results?search_query=${encodeURIComponent(`${currentSong.title} ${currentSong.artist}`)}`}
+                      url={currentSong.youtubeUrl}
                       playing={isPlaying}
                       volume={isMuted ? 0 : volume}
                       onProgress={(state: any) => setPlayed(state.played)}
-                      onDuration={(d: any) => setDuration(d)}
-                      onEnded={() => {
-                        setIsPlaying(false);
-                        setPlayed(0);
+                      onDuration={(d: number) => setDuration(d)}
+                      onReady={() => {
+                        if (playerRef.current) {
+                          const d = playerRef.current.getDuration();
+                          if (d > 0) setDuration(d);
+                        }
                       }}
-                      width="0"
-                      height="0"
+                      onBuffer={() => setIsBuffering(true)}
+                      onBufferEnd={() => setIsBuffering(false)}
+                      onStart={() => {
+                        setIsPlaying(true);
+                        setIsBuffering(false);
+                      }}
+                      onPlay={() => setIsPlaying(true)}
+                      onPause={() => setIsPlaying(false)}
+                      onError={(e: any) => {
+                        console.error("Player Error:", e);
+                        setPlayerError("Failed to load audio. Try another song or search manually.");
+                        setIsPlaying(false);
+                        setIsBuffering(false);
+                      }}
+                      onEnded={handleNext}
+                      width="100%"
+                      height="100%"
+                      config={{
+                        youtube: {
+                          playerVars: { 
+                            autoplay: 1,
+                            controls: 0,
+                            modestbranding: 1,
+                            rel: 0,
+                            showinfo: 0,
+                            origin: window.location.origin
+                          }
+                        }
+                      }}
                     />
                   )}
                 </div>
-                <div className="flex items-center gap-6">
-                  <button className="text-white/30 hover:text-white transition-colors">
-                    <SkipBack size={20} />
-                  </button>
-                  <button 
-                    onClick={() => setIsPlaying(!isPlaying)}
-                    className="w-10 h-10 rounded-full bg-white text-black flex items-center justify-center hover:scale-110 transition-transform"
+                <div className="flex items-center gap-4 md:gap-8">
+                  <motion.button 
+                    whileHover={{ scale: 1.1, color: 'var(--text-primary)' }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={() => {
+                      setPlayed(0);
+                      setIsPlaying(true);
+                      playerRef.current?.seekTo(0);
+                    }}
+                    className="text-[var(--text-muted)] transition-colors hidden md:block"
+                    title="Restart"
                   >
-                    {isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" className="ml-1" />}
-                  </button>
-                  <button className="text-white/30 hover:text-white transition-colors">
-                    <SkipForward size={20} />
-                  </button>
+                    <RefreshCw size={16} />
+                  </motion.button>
+                  <motion.button 
+                    whileHover={{ scale: 1.1, color: 'var(--text-primary)' }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={handlePrev}
+                    className="text-[var(--text-muted)] transition-colors"
+                    title="Previous"
+                  >
+                    <SkipBack size={24} />
+                  </motion.button>
+                  <motion.button 
+                    whileHover={{ scale: 1.1 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={() => setIsPlaying(!isPlaying)}
+                    className="w-12 h-12 rounded-full bg-[var(--text-primary)] text-[var(--bg-color)] flex items-center justify-center hover:scale-110 transition-transform shadow-lg relative"
+                  >
+                    {isBuffering && (
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                        className="absolute -inset-1 border-2 border-orange-500 border-t-transparent rounded-full"
+                      />
+                    )}
+                    {isPlaying ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" className="ml-1" />}
+                  </motion.button>
+                  <motion.button 
+                    whileHover={{ scale: 1.1, color: 'var(--text-primary)' }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={handleNext}
+                    className="text-[var(--text-muted)] transition-colors"
+                    title="Next"
+                  >
+                    <SkipForward size={24} />
+                  </motion.button>
+                  <motion.button 
+                    whileHover={{ scale: 1.1, color: 'var(--text-primary)' }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={() => setIsMuted(!isMuted)}
+                    className="text-[var(--text-muted)] transition-colors hidden md:block"
+                  >
+                    {isMuted || volume === 0 ? <VolumeX size={20} /> : volume < 0.5 ? <Volume1 size={20} /> : <Volume2 size={20} />}
+                  </motion.button>
                 </div>
                 <div className="w-full flex items-center gap-3">
-                  <span className="text-[10px] font-mono text-white/30 w-8 text-right">{formatTime(played * duration)}</span>
+                  <span className="text-[10px] font-mono text-white/30 w-10 text-right">{formatTime(played * duration)}</span>
                   <div 
-                    className="flex-1 h-1 bg-white/10 rounded-full relative group/progress cursor-pointer"
+                    className={`flex-1 h-1.5 bg-white/10 rounded-full relative group/progress cursor-pointer overflow-hidden ${isBuffering ? 'animate-pulse' : ''}`}
                     onClick={handleSeek}
                   >
                     <div className="absolute inset-0 w-full h-full">
                       <motion.div 
-                        className="h-full bg-orange-500 rounded-full relative" 
+                        className="h-full bg-gradient-to-r from-orange-600 to-orange-400 rounded-full relative" 
                         style={{ width: `${played * 100}%` }}
+                        layoutId="progress-bar"
                       >
                         <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-lg scale-0 group-hover/progress:scale-100 transition-transform" />
                       </motion.div>
+                      {isBuffering && (
+                        <motion.div
+                          initial={{ x: '-100%' }}
+                          animate={{ x: '100%' }}
+                          transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                          className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent"
+                        />
+                      )}
                     </div>
                   </div>
-                  <span className="text-[10px] font-mono text-white/30 w-8">{formatTime(duration)}</span>
+                  <span className="text-[10px] font-mono text-white/30 w-10">{formatTime(duration)}</span>
                 </div>
               </div>
 
               <div className="flex items-center gap-4 flex-1 justify-end">
-                <button
-                  onClick={handleShowLyrics}
-                  className="p-2 rounded-lg hover:bg-white/10 text-white/40 hover:text-white transition-all flex items-center gap-2"
-                  title="Show Lyrics"
-                >
-                  <Quote size={18} />
-                  <span className="text-[10px] font-mono uppercase tracking-widest hidden md:inline">Lyrics</span>
-                </button>
-                <div className="flex items-center gap-3 group/volume">
+                <div className="hidden md:flex items-center gap-3 group/volume bg-[var(--glass-bg)] px-3 py-2 rounded-xl border border-[var(--glass-border)]">
                   <button 
                     onClick={() => setIsMuted(!isMuted)}
-                    className="text-white/40 hover:text-white transition-colors"
+                    className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                   >
-                    {isMuted || volume === 0 ? <VolumeX size={20} /> : volume < 0.5 ? <Volume1 size={20} /> : <Volume2 size={20} />}
+                    {isMuted || volume === 0 ? <VolumeX size={16} /> : volume < 0.5 ? <Volume1 size={16} /> : <Volume2 size={16} />}
                   </button>
-                  <div className="w-24 h-1 bg-white/10 rounded-full relative group-hover/volume:bg-white/20 transition-colors">
-                    <input
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.01"
-                      value={isMuted ? 0 : volume}
-                      onChange={(e) => {
-                        setVolume(parseFloat(e.target.value));
-                        if (isMuted) setIsMuted(false);
-                      }}
-                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                    />
-                    <motion.div 
-                      className="absolute top-0 left-0 h-full bg-white rounded-full"
-                      style={{ width: `${(isMuted ? 0 : volume) * 100}%` }}
-                    />
-                  </div>
+                  <input 
+                    type="range" 
+                    min="0" 
+                    max="1" 
+                    step="0.01" 
+                    value={isMuted ? 0 : volume}
+                    onChange={handleVolumeChange}
+                    className="w-20 lg:w-32 h-1 bg-[var(--glass-border)] rounded-full appearance-none cursor-pointer accent-orange-500 hover:bg-[var(--glass-border)] transition-colors"
+                  />
                 </div>
+                <button
+                  onClick={() => currentSong && handleShowLyrics(currentSong)}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 hover:text-white transition-all border border-white/10"
+                >
+                  <Quote size={16} />
+                  <span className="text-xs font-bold uppercase tracking-wider hidden md:inline">Lyrics</span>
+                </button>
                 <button 
                   onClick={() => setCurrentSong(null)}
                   className="p-2 rounded-lg hover:bg-white/10 text-white/20 hover:text-white transition-all"
